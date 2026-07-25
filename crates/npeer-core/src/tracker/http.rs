@@ -29,7 +29,7 @@ pub(super) async fn announce(url: &str, params: &AnnounceParams) -> Result<Annou
         .get(&request_url)
         .send()
         .await
-        .map_err(|e| Error::Tracker(format!("{url}: {e}")))?;
+        .map_err(|e| Error::Tracker(format!("{url}: {}", describe(&e))))?;
     let status = response.status();
     if !status.is_success() {
         return Err(Error::Tracker(format!("{url}: HTTP {status}")));
@@ -37,9 +37,26 @@ pub(super) async fn announce(url: &str, params: &AnnounceParams) -> Result<Annou
     let body = response
         .bytes()
         .await
-        .map_err(|e| Error::Tracker(format!("{url}: reading body: {e}")))?;
+        .map_err(|e| Error::Tracker(format!("{url}: reading body: {}", describe(&e))))?;
 
     parse_response(&body).map_err(|e| Error::Tracker(format!("{url}: {e}")))
+}
+
+/// reqwest errors hide their cause behind `source()`; flatten the chain so
+/// users see "connection refused" or "certificate expired", not just
+/// "error sending request".
+fn describe(error: &(dyn std::error::Error + 'static)) -> String {
+    let mut text = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        let cause_text = cause.to_string();
+        if !text.contains(&cause_text) {
+            text.push_str(": ");
+            text.push_str(&cause_text);
+        }
+        source = cause.source();
+    }
+    text
 }
 
 /// Build the announce URL. The info hash and peer id are raw bytes, so they
