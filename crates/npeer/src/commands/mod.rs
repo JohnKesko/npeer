@@ -7,6 +7,8 @@ pub mod info;
 pub mod list;
 pub mod manage;
 pub mod peers;
+#[cfg(feature = "upgrade")]
+pub mod upgrade;
 pub mod verify;
 
 use std::net::SocketAddr;

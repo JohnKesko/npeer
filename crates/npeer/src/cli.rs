@@ -25,8 +25,10 @@ pub struct Cli {
     #[arg(short, long, global = true, action = clap::ArgAction::Count)]
     pub verbose: u8,
 
+    /// Optional so that a bare `npeer` (or `npeer -v` with no command)
+    /// shows the help screen instead of a terse error.
     #[command(subcommand)]
-    pub command: Command,
+    pub command: Option<Command>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -102,6 +104,17 @@ pub enum Command {
     Decode {
         /// Bencoded input; reads stdin when omitted
         value: Option<String>,
+    },
+
+    /// Upgrade npeer to the latest released version
+    #[cfg(feature = "upgrade")]
+    Upgrade {
+        /// Only check whether a newer version exists
+        #[arg(long)]
+        check: bool,
+        /// Skip the confirmation question
+        #[arg(short = 'y', long)]
+        yes: bool,
     },
 
     /// Generate shell completions
@@ -242,7 +255,7 @@ mod tests {
             "5MiB",
             "--no-seed",
         ]);
-        let Command::Download(args) = cli.command else {
+        let Some(Command::Download(args)) = cli.command else {
             panic!("wrong command")
         };
         assert_eq!(args.sources, vec!["a.torrent"]);
@@ -258,7 +271,7 @@ mod tests {
     #[test]
     fn limit_unlimited_parses_to_none_override() {
         let cli = Cli::parse_from(["npeer", "download", "x", "--limit-down", "unlimited"]);
-        let Command::Download(args) = cli.command else {
+        let Some(Command::Download(args)) = cli.command else {
             panic!("wrong command")
         };
         assert_eq!(args.tuning.to_overrides().download_limit, Some(None));
@@ -271,6 +284,27 @@ mod tests {
         assert!(Cli::try_parse_from(["npeer", "resume", "--all"]).is_ok());
         assert!(Cli::try_parse_from(["npeer", "resume", "abc"]).is_ok());
         assert!(Cli::try_parse_from(["npeer", "resume", "abc", "--all"]).is_err());
+    }
+
+    #[test]
+    fn bare_invocation_parses_without_a_subcommand() {
+        // `npeer` and `npeer -v` show help instead of a usage error.
+        assert!(Cli::parse_from(["npeer"]).command.is_none());
+        assert!(Cli::parse_from(["npeer", "-v"]).command.is_none());
+    }
+
+    #[cfg(feature = "upgrade")]
+    #[test]
+    fn upgrade_flags_parse() {
+        let cli = Cli::parse_from(["npeer", "upgrade", "--check"]);
+        assert!(matches!(
+            cli.command,
+            Some(Command::Upgrade {
+                check: true,
+                yes: false
+            })
+        ));
+        assert!(Cli::try_parse_from(["npeer", "upgrade", "-y"]).is_ok());
     }
 
     #[test]

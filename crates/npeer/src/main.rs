@@ -42,8 +42,15 @@ fn main() -> ExitCode {
 async fn run(cli: Cli) -> Result<ExitCode> {
     let config_arg = cli.config.as_deref();
 
+    // No subcommand (plain `npeer`, or stray flags like `npeer -v`):
+    // show the help screen instead of a terse usage error.
+    let Some(command) = cli.command else {
+        Cli::command().print_help()?;
+        return Ok(ExitCode::from(2));
+    };
+
     // Commands that do not need resolved settings.
-    match &cli.command {
+    match &command {
         Command::Decode { value } => {
             commands::decode::run(value.as_deref())?;
             return Ok(ExitCode::SUCCESS);
@@ -52,6 +59,12 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             let mut command = Cli::command();
             clap_complete::generate(*shell, &mut command, "npeer", &mut std::io::stdout());
             return Ok(ExitCode::SUCCESS);
+        }
+        #[cfg(feature = "upgrade")]
+        Command::Upgrade { check, yes } => {
+            // Deliberately independent of the config: upgrading must work
+            // even when the config file is broken.
+            return commands::upgrade::run(config::ProgressMode::Auto, *check, *yes).await;
         }
         Command::Config { action } => {
             match action {
@@ -71,7 +84,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
 
     // Everything else runs with resolved settings.
     let (file, _path) = config::load_file(config_arg)?;
-    let overrides = match &cli.command {
+    let overrides = match &command {
         Command::Download(args) => args.tuning.to_overrides(),
         Command::Resume(args) => args.tuning.to_overrides(),
         _ => Overrides::default(),
@@ -79,7 +92,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
     let settings = config::resolve(&file, &overrides, env_lookup)?;
     let ctx = Ctx::new(settings)?;
 
-    let code = match cli.command {
+    let code = match command {
         Command::Download(args) => {
             commands::download::run(&ctx, &args.sources, args.tuning.output.clone()).await?
         }
@@ -125,6 +138,8 @@ async fn run(cli: Cli) -> Result<ExitCode> {
         Command::Decode { .. } | Command::Completions { .. } | Command::Config { .. } => {
             unreachable!("handled above")
         }
+        #[cfg(feature = "upgrade")]
+        Command::Upgrade { .. } => unreachable!("handled above"),
     };
     Ok(code)
 }
