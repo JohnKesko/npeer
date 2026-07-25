@@ -314,6 +314,10 @@ async fn drive_ui(
     let mut events_open = true;
     let mut interrupts: u32 = 0;
     let mut wait = pin!(engine.wait());
+    // A dropped SSH connection or closed terminal sends SIGHUP; treat it
+    // like Ctrl+C so the download pauses cleanly instead of dying mid-write.
+    let mut hangup = pin!(hangup_signal());
+    let mut hangup_seen = false;
 
     let summary = loop {
         tokio::select! {
@@ -328,6 +332,13 @@ async fn drive_ui(
                 } else {
                     std::process::exit(130);
                 }
+            }
+
+            _ = &mut hangup, if !hangup_seen => {
+                hangup_seen = true;
+                ui.set_paused();
+                tracing::info!("hangup received; pausing and saving state");
+                stopper.cancel();
             }
 
             _ = ticker.tick() => {
@@ -356,6 +367,22 @@ async fn drive_ui(
 
     ui.finish();
     Ok(summary)
+}
+
+/// Resolves when the process receives SIGHUP (Unix only; never on Windows).
+async fn hangup_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        match signal(SignalKind::hangup()) {
+            Ok(mut hangups) => {
+                hangups.recv().await;
+            }
+            Err(_) => std::future::pending::<()>().await,
+        }
+    }
+    #[cfg(not(unix))]
+    std::future::pending::<()>().await;
 }
 
 /// Save the current picture of a torrent, reusing history from any
