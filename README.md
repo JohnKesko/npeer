@@ -92,6 +92,36 @@ cargo install --git https://github.com/JohnKesko/npeer npeer
 Not sure which Linux build you need? `uname -m` says `x86_64` or
 `aarch64` — pick the matching file.
 
+## Updating
+
+After the first install, updating is one command:
+
+```bash
+npeer upgrade
+```
+
+npeer looks up the newest published release, downloads the right file
+for your machine, verifies its checksum, and replaces itself. Use
+`npeer upgrade --check` to only find out whether something newer exists.
+
+Which flavor of that command you need depends on how you installed:
+
+- **Downloaded a binary to `/usr/local/bin`** (the install commands
+  above): that folder belongs to root, so run `sudo npeer upgrade`.
+  npeer detects this itself and tells you.
+- **Installed with cargo** (`cargo install --git ...`): the binary lives
+  in your own home folder (`~/.cargo/bin`), so plain `npeer upgrade`
+  works without sudo — and it's much faster than recompiling, because it
+  swaps in the official pre-built binary. Re-running your original
+  `cargo install` command with `--force` also still works if you prefer
+  building from source.
+
+Your downloads, resume data and configuration are never touched by an
+update.
+
+For package maintainers: build with `--no-default-features` to leave the
+`upgrade` command out, so updating stays in the package manager's hands.
+
 ## Quick start
 
 There is nothing to set up. Downloads are saved to your computer's
@@ -134,6 +164,7 @@ Press **Ctrl+C** at any time — the download pauses, state is saved, and
 | `npeer remove <id> [--delete-files]` | Forget a torrent |
 | `npeer verify <id>` | Re-check downloaded data against the piece hashes |
 | `npeer config init\|show\|path\|validate` | Manage configuration |
+| `npeer upgrade` | Update npeer itself to the latest release |
 | `npeer completions <shell>` | Shell completions (bash, zsh, fish, ...) |
 
 **Where do those ids come from?** You never have to hunt for them:

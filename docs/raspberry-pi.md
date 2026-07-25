@@ -179,15 +179,21 @@ Torrents can be named by any unique part of their name or id:
 
 ## Updating npeer
 
-Same three commands as installing — the new binary replaces the old one:
+One command:
 
 ```bash
-curl -LO https://github.com/JohnKesko/npeer/releases/latest/download/npeer-aarch64-unknown-linux-musl.tar.gz
-tar -xzf npeer-aarch64-unknown-linux-musl.tar.gz
-sudo mv npeer-aarch64-unknown-linux-musl/npeer /usr/local/bin/
+sudo npeer upgrade
 ```
 
+npeer downloads the newest release for the Pi, verifies it, and replaces
+itself. The `sudo` is needed because the binary lives in `/usr/local/bin`;
+if you installed with cargo instead, it lives in your home folder and
+plain `npeer upgrade` is enough. Just curious whether there is anything
+new? `npeer upgrade --check` tells you without changing anything.
+
 Your downloads, resume data and configuration are untouched by updates.
+And if you ever prefer the manual way, the three install commands from
+the top of this guide always work too.
 
 ## Where things live
 
