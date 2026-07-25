@@ -14,6 +14,7 @@ pub struct TransferStats {
     downloaded: AtomicU64,
     uploaded: AtomicU64,
     wasted: AtomicU64,
+    hash_failures: AtomicU64,
     download_window: SpeedWindow,
     upload_window: SpeedWindow,
     peak_download: AtomicU64,
@@ -37,6 +38,15 @@ impl TransferStats {
     /// Bytes received but thrown away (duplicates, failed pieces).
     pub fn record_wasted(&self, bytes: u64) {
         self.wasted.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    /// A piece failed its hash check and will be downloaded again.
+    pub fn record_hash_failure(&self) {
+        self.hash_failures.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn hash_failures(&self) -> u64 {
+        self.hash_failures.load(Ordering::Relaxed)
     }
 
     pub fn downloaded(&self) -> u64 {

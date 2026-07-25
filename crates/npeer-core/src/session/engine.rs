@@ -120,6 +120,8 @@ pub struct Snapshot {
     pub swarm_leechers: Option<u32>,
     pub pieces_have: u32,
     pub piece_count: u32,
+    /// Pieces that failed their hash check and were downloaded again.
+    pub hash_failures: u64,
     pub endgame: bool,
     pub elapsed: Duration,
 }
@@ -218,6 +220,7 @@ impl Engine {
             swarm_leechers: None,
             pieces_have: picker.have_count(),
             piece_count: picker.piece_count(),
+            hash_failures: 0,
             endgame: false,
             elapsed: Duration::ZERO,
         };
@@ -559,6 +562,7 @@ fn publish_snapshot(
         swarm_leechers,
         pieces_have,
         piece_count,
+        hash_failures: shared.stats.hash_failures(),
         endgame,
         elapsed,
     };
@@ -1178,8 +1182,9 @@ async fn finish_piece(shared: &Arc<Shared>, key: u64, piece: u32) -> Result<()> 
         shared
             .stats
             .record_wasted(shared.metainfo.piece_size(piece));
+        shared.stats.record_hash_failure();
         let _ = shared.events.send(Event::PieceFailed { piece });
-        tracing::warn!(piece, "piece failed hash check; re-downloading");
+        tracing::debug!(piece, "piece failed hash check; re-downloading");
         // If this peer was the only contributor, it is feeding us garbage.
         if contributors == [key] {
             return Err(Error::protocol("peer sent data failing hash verification"));
