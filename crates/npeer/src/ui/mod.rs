@@ -142,8 +142,10 @@ impl DownloadUi {
 
             let spacer_1 = spacer();
             let bar = multi.add(ProgressBar::new(total.max(1)));
+            // The percentage lives in the message, floored, so the bar
+            // never claims 100% while pieces are still missing.
             bar.set_style(
-                ProgressStyle::with_template("[{bar:38.cyan/blue}] {percent:>3}%  {msg}")
+                ProgressStyle::with_template("[{bar:38.cyan/blue}] {msg}")
                     .unwrap()
                     .progress_chars("=> "),
             );
@@ -234,8 +236,11 @@ impl DownloadUi {
                     .set_message(fit(format!("To: {}", self.dest), 1));
                 ui.bar.set_length(snapshot.total_bytes.max(1));
                 ui.bar.set_position(snapshot.verified_bytes);
+                // Integer division floors: 99.6% shows as 99%, and 100%
+                // appears only when every byte is verified.
+                let percent = snapshot.verified_bytes * 100 / snapshot.total_bytes.max(1);
                 ui.bar.set_message(format!(
-                    "{} / {}",
+                    "{percent:>3}%  {} / {}",
                     units::bytes(snapshot.verified_bytes),
                     units::bytes(snapshot.total_bytes)
                 ));
