@@ -92,6 +92,21 @@ can log out, come back tomorrow, and check on it with:
 tmux attach -t torrents
 ```
 
+We recommend tmux because it is the only option where you can come back
+later and watch the live progress screen again. But it is not the only
+way:
+
+- **screen** — the older tool that does the same job. If you already use
+  it: `screen -S torrents`, detach with **Ctrl+A, then D**, come back
+  with `screen -r torrents`.
+- **nohup** — nothing to install: `nohup npeer download '...' &`. The
+  trade-off is that you can never see the live screen again; check
+  progress with `npeer status` and pause with `kill -INT <pid>`.
+- **Nothing at all** — also fine. If your SSH connection drops, npeer
+  notices the hangup, pauses cleanly and saves its progress. Next time
+  you log in, `npeer resume --all` continues where it stopped. You lose
+  the "keeps downloading while I'm away" part, but never any data.
+
 ## Continue automatically after a reboot
 
 Power cuts and reboots happen. npeer already remembers where every
