@@ -19,6 +19,7 @@ anyhow.workspace = true
 chrono.workspace = true
 clap.workspace = true
 clap_complete.workspace = true
+console.workspace = true
 directories-next.workspace = true
 indicatif.workspace = true
 serde.workspace = true

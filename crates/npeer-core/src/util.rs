@@ -1,6 +1,6 @@
 //! Small helpers with no better home.
 
-use rand::Rng;
+use rand::RngExt;
 
 /// Percent-encode raw bytes for tracker query strings.
 ///
@@ -18,9 +18,9 @@ pub fn urlencode_bytes(bytes: &[u8]) -> String {
 /// Random alphanumeric ASCII string, used for peer id suffixes.
 pub fn random_alnum(len: usize) -> String {
     const CHARS: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     (0..len)
-        .map(|_| CHARS[rng.gen_range(0..CHARS.len())] as char)
+        .map(|_| CHARS[rng.random_range(0..CHARS.len())] as char)
         .collect()
 }
 

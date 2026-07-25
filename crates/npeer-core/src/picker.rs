@@ -12,7 +12,7 @@
 
 use std::collections::HashMap;
 
-use rand::Rng;
+use rand::RngExt;
 
 /// Blocks are requested in 16 KiB chunks, as in the original implementation.
 pub const BLOCK_SIZE: u32 = 16 * 1024;
@@ -278,7 +278,7 @@ impl PiecePicker {
     fn choose_new_piece(&self, bits: &PeerBitfield) -> Option<u32> {
         let mut best: Option<(u32, u32)> = None; // (availability, piece)
         let mut ties = 0u32;
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
 
         for piece in 0..self.piece_count {
             let index = piece as usize;
@@ -302,7 +302,7 @@ impl PiecePicker {
                 Some((best_avail, _)) if availability == best_avail => {
                     // Reservoir sampling keeps the choice uniform among ties.
                     ties += 1;
-                    if rng.gen_range(0..ties) == 0 {
+                    if rng.random_range(0..ties) == 0 {
                         best = Some((availability, piece));
                     }
                 }
