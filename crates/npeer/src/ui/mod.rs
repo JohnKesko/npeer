@@ -86,7 +86,9 @@ pub struct DownloadUi {
     last_plain_print: Instant,
     name: String,
     dest: String,
-    limits_line: String,
+    /// ` · cap 3.00 MiB/s` when a limit is set, empty otherwise.
+    cap_down: String,
+    cap_up: String,
     paused: bool,
 }
 
@@ -95,9 +97,13 @@ struct FancyUi {
     title: ProgressBar,
     destination: ProgressBar,
     bar: ProgressBar,
-    transfer: ProgressBar,
+    down_line: ProgressBar,
+    up_line: ProgressBar,
     peers: ProgressBar,
+    pieces: ProgressBar,
     timing: ProgressBar,
+    /// Blank lines separating the groups; kept alive so they stay drawn.
+    _spacers: Vec<ProgressBar>,
 }
 
 impl DownloadUi {
@@ -109,19 +115,10 @@ impl DownloadUi {
         download_limit: Option<u64>,
         upload_limit: Option<u64>,
     ) -> DownloadUi {
-        // Only mention caps when set, and compactly, so lines stay narrow.
-        let limits_line = match (download_limit, upload_limit) {
-            (None, None) => String::new(),
-            (down, up) => {
-                let mut caps = " · caps".to_owned();
-                if let Some(down) = down {
-                    caps.push_str(&format!(" ↓{}", units::rate(down)));
-                }
-                if let Some(up) = up {
-                    caps.push_str(&format!(" ↑{}", units::rate(up)));
-                }
-                caps
-            }
+        let cap = |limit: Option<u64>| {
+            limit
+                .map(|l| format!(" · cap {}", units::rate(l)))
+                .unwrap_or_default()
         };
         let fancy_ui = fancy(mode).then(|| {
             let multi = MultiProgress::new();
@@ -130,28 +127,46 @@ impl DownloadUi {
                 bar.set_style(ProgressStyle::with_template(template).unwrap());
                 bar
             };
+            // Bars that are never updated are never drawn, so spacers get
+            // one initial message to make their blank line appear.
+            let spacer = || {
+                let bar = line("{msg}");
+                bar.set_message(" ");
+                bar
+            };
+
             let title = multi.add(ProgressBar::no_length());
             title.set_style(ProgressStyle::with_template("{spinner:.green} {msg}").unwrap());
             title.enable_steady_tick(Duration::from_millis(120));
+            let destination_line = line("{msg}");
 
-            let destination_line = line("  {msg}");
+            let spacer_1 = spacer();
             let bar = multi.add(ProgressBar::new(total.max(1)));
             bar.set_style(
-                ProgressStyle::with_template("  [{bar:38.cyan/blue}] {percent:>3}%  {msg}")
+                ProgressStyle::with_template("[{bar:38.cyan/blue}] {percent:>3}%  {msg}")
                     .unwrap()
                     .progress_chars("=> "),
             );
-            let transfer = line("  {msg}");
-            let peers = line("  {msg}");
-            let timing = line("  {msg}");
+            let spacer_2 = spacer();
+
+            let down_line = line("{msg}");
+            let up_line = line("{msg}");
+            let spacer_3 = spacer();
+
+            let peers = line("{msg}");
+            let pieces = line("{msg}");
+            let timing = line("{msg}");
             FancyUi {
                 multi,
                 title,
                 destination: destination_line,
                 bar,
-                transfer,
+                down_line,
+                up_line,
                 peers,
+                pieces,
                 timing,
+                _spacers: vec![spacer_1, spacer_2, spacer_3],
             }
         });
 
@@ -160,9 +175,16 @@ impl DownloadUi {
             last_plain_print: Instant::now() - Duration::from_secs(60),
             name: name.to_owned(),
             dest: destination.display().to_string(),
-            limits_line,
+            cap_down: cap(download_limit),
+            cap_up: cap(upload_limit),
             paused: false,
         }
+    }
+
+    /// Terminal width right now, with a sane floor for tiny windows.
+    fn width() -> usize {
+        let (_, columns) = console::Term::stderr().size();
+        (columns as usize).max(40)
     }
 
     /// Show a line above the live display (survives redraws).
@@ -198,8 +220,18 @@ impl DownloadUi {
 
         match &self.fancy {
             Some(ui) => {
-                ui.title.set_message(format!("{status}  {}", self.name));
-                ui.destination.set_message(format!("to {}", self.dest));
+                // Clamp every line to the terminal width: overlong lines
+                // wrap, which breaks in-place redrawing and floods the
+                // scrollback with stale copies.
+                let width = Self::width();
+                let fit = |text: String, reserved: usize| {
+                    units::truncate_name(&text, width.saturating_sub(reserved))
+                };
+
+                ui.title
+                    .set_message(fit(format!("{status}: {}", self.name), 3));
+                ui.destination
+                    .set_message(fit(format!("To: {}", self.dest), 1));
                 ui.bar.set_length(snapshot.total_bytes.max(1));
                 ui.bar.set_position(snapshot.verified_bytes);
                 ui.bar.set_message(format!(
@@ -207,12 +239,18 @@ impl DownloadUi {
                     units::bytes(snapshot.verified_bytes),
                     units::bytes(snapshot.total_bytes)
                 ));
-                ui.transfer.set_message(format!(
-                    "down {} (avg {}) · up {}{}",
-                    units::rate(snapshot.download_rate),
-                    units::rate(snapshot.average_download_rate),
-                    units::rate(snapshot.upload_rate),
-                    self.limits_line,
+                ui.down_line.set_message(fit(
+                    format!(
+                        "down: {} (avg {}){}",
+                        units::rate(snapshot.download_rate),
+                        units::rate(snapshot.average_download_rate),
+                        self.cap_down,
+                    ),
+                    1,
+                ));
+                ui.up_line.set_message(fit(
+                    format!("up: {}{}", units::rate(snapshot.upload_rate), self.cap_up),
+                    1,
                 ));
                 let swarm = match (snapshot.swarm_seeders, snapshot.swarm_leechers) {
                     (Some(seeders), Some(leechers)) => {
@@ -220,9 +258,26 @@ impl DownloadUi {
                     }
                     _ => String::new(),
                 };
-                ui.peers.set_message(format!(
-                    "peers {} ({} seeds) · discovered {}{swarm}",
-                    snapshot.connected_peers, snapshot.connected_seeders, snapshot.discovered_peers,
+                ui.peers.set_message(fit(
+                    format!(
+                        "peers {} ({} seeds) · discovered {}{swarm}",
+                        snapshot.connected_peers,
+                        snapshot.connected_seeders,
+                        snapshot.discovered_peers,
+                    ),
+                    1,
+                ));
+                let redownloaded = if snapshot.hash_failures > 0 {
+                    format!(" · re-downloaded: {}", snapshot.hash_failures)
+                } else {
+                    String::new()
+                };
+                ui.pieces.set_message(fit(
+                    format!(
+                        "verified: {}/{} pieces{redownloaded}",
+                        snapshot.pieces_have, snapshot.piece_count,
+                    ),
+                    1,
                 ));
                 let eta_text = match eta {
                     Some(eta) if snapshot.phase == EnginePhase::Downloading => format!(
@@ -232,9 +287,9 @@ impl DownloadUi {
                     ),
                     _ => String::new(),
                 };
-                ui.timing.set_message(format!(
-                    "elapsed {}{eta_text}",
-                    units::duration(snapshot.elapsed)
+                ui.timing.set_message(fit(
+                    format!("elapsed {}{eta_text}", units::duration(snapshot.elapsed)),
+                    1,
                 ));
             }
             None => {
@@ -251,8 +306,13 @@ impl DownloadUi {
                 let eta_text = eta
                     .map(|e| format!(", eta {}", units::duration(e)))
                     .unwrap_or_default();
+                let redownloaded = if snapshot.hash_failures > 0 {
+                    format!(", {} re-downloaded", snapshot.hash_failures)
+                } else {
+                    String::new()
+                };
                 println!(
-                    "{status}: {percent:.1}% ({} / {}) at {}, {} peers{eta_text}",
+                    "{status}: {percent:.1}% ({} / {}) at {}, {} peers{redownloaded}{eta_text}",
                     units::bytes(snapshot.verified_bytes),
                     units::bytes(snapshot.total_bytes),
                     units::rate(snapshot.download_rate),

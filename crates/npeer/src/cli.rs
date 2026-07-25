@@ -123,8 +123,9 @@ pub struct DownloadArgs {
 
 #[derive(Args, Debug)]
 pub struct ResumeArgs {
-    /// Torrent id: an info-hash prefix or part of the name
-    #[arg(conflicts_with = "all", required_unless_present = "all")]
+    /// Torrent id: an info-hash prefix or part of the name.
+    /// Run `npeer resume` with no arguments to see what can be resumed.
+    #[arg(conflicts_with = "all")]
     pub id: Option<String>,
 
     /// Resume every unfinished torrent, one after another
@@ -264,8 +265,9 @@ mod tests {
     }
 
     #[test]
-    fn resume_requires_id_or_all() {
-        assert!(Cli::try_parse_from(["npeer", "resume"]).is_err());
+    fn resume_accepts_bare_form_id_or_all() {
+        // Bare `resume` lists what can be resumed instead of erroring.
+        assert!(Cli::try_parse_from(["npeer", "resume"]).is_ok());
         assert!(Cli::try_parse_from(["npeer", "resume", "--all"]).is_ok());
         assert!(Cli::try_parse_from(["npeer", "resume", "abc"]).is_ok());
         assert!(Cli::try_parse_from(["npeer", "resume", "abc", "--all"]).is_err());

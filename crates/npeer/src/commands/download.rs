@@ -65,8 +65,11 @@ pub async fn resume(ctx: &Ctx, id: Option<&str>, all: bool) -> Result<ExitCode> 
                     && s.progress() < 1.0
             })
             .collect()
+    } else if let Some(id) = id {
+        vec![ctx.store.resolve(id)?]
     } else {
-        vec![ctx.store.resolve(id.expect("clap enforces id"))?]
+        // Plain `npeer resume`: show what can be resumed and how.
+        return show_resumable(ctx);
     };
 
     if targets.is_empty() {
@@ -98,6 +101,40 @@ pub async fn resume(ctx: &Ctx, id: Option<&str>, all: bool) -> Result<ExitCode> 
 enum RunOutcome {
     Complete,
     Paused,
+}
+
+/// `npeer resume` without arguments: list unfinished torrents with their
+/// ids, so nobody has to guess where ids come from.
+fn show_resumable(ctx: &Ctx) -> Result<ExitCode> {
+    let unfinished: Vec<TorrentState> = ctx
+        .store
+        .list()?
+        .into_iter()
+        .filter(|s| s.progress() < 1.0)
+        .collect();
+
+    if unfinished.is_empty() {
+        println!("Nothing to resume — every torrent npeer knows about is finished.");
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    println!("Unfinished downloads:\n");
+    let rows: Vec<Vec<String>> = unfinished
+        .iter()
+        .map(|s| {
+            vec![
+                s.info_hash.to_hex()[..8].to_owned(),
+                crate::units::truncate_name(&s.name, 48),
+                format!("{:.1}%", s.progress() * 100.0),
+            ]
+        })
+        .collect();
+    print!("{}", ui::table(&["id", "name", "done"], &rows));
+    println!();
+    println!("Resume one:  npeer resume <id or part of the name>");
+    println!("Resume all:  npeer resume --all");
+    println!("Remove one:  npeer remove <id>   (--delete-files also deletes its files)");
+    Ok(ExitCode::SUCCESS)
 }
 
 async fn download_one(
@@ -256,10 +293,17 @@ async fn drive_ui(
     let mut events = engine.take_events().expect("events taken once");
     let stopper = engine.stopper();
 
+    // The title already names the download; the To: line shows just the
+    // directory so the name does not appear twice.
+    let target_dir = storage
+        .content_path()
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| storage.content_path().to_path_buf());
     let mut ui = DownloadUi::new(
         ctx.settings.progress,
         &metainfo.name,
-        storage.content_path(),
+        &target_dir,
         metainfo.total_length,
         options.download_limit,
         options.upload_limit,
@@ -293,7 +337,9 @@ async fn drive_ui(
             event = events.recv(), if events_open => {
                 match event {
                     Some(Event::PieceFailed { piece }) => {
-                        ui.note(&format!("Piece {piece} failed verification — downloading again"));
+                        // Shown as the re-downloaded counter in the live
+                        // display; per-piece messages would flood it.
+                        tracing::info!(piece, "piece failed verification; downloading again");
                     }
                     Some(Event::SeedingStarted) => {
                         ui.note("Download complete — now seeding");
