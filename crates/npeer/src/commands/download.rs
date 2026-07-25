@@ -15,7 +15,7 @@ use npeer_core::storage::Storage;
 use npeer_core::{Metainfo, verify};
 use tokio_util::sync::CancellationToken;
 
-use crate::commands::{Ctx, parse_source, resolve_source};
+use crate::commands::{Ctx, Source, parse_source, resolve_source};
 use crate::ui::{self, DownloadUi, VerifyUi};
 
 /// `npeer download <sources...>`
@@ -24,13 +24,19 @@ pub async fn run(
     sources: &[String],
     explicit_output: Option<PathBuf>,
 ) -> Result<ExitCode> {
+    // Validate every source up front: a typo in the third argument must
+    // fail now, not after the first download has run for an hour.
+    let parsed: Vec<Source> = sources
+        .iter()
+        .map(|input| parse_source(input))
+        .collect::<Result<_>>()?;
+
     let mut paused = false;
-    for (index, input) in sources.iter().enumerate() {
+    for (index, source) in parsed.iter().enumerate() {
         if index > 0 {
             println!();
         }
-        let source = parse_source(input)?;
-        let (metainfo, doc) = resolve_source(ctx, &source).await?;
+        let (metainfo, doc) = resolve_source(ctx, source).await?;
         ctx.store.save_torrent_file(metainfo.info_hash, &doc)?;
 
         match download_one(ctx, metainfo, explicit_output.clone()).await? {

@@ -49,6 +49,13 @@ pub fn parse_source(input: &str) -> Result<Source> {
         return Ok(Source::Magnet(MagnetLink::parse(input)?));
     }
     let path = PathBuf::from(input);
+    if path.is_dir() {
+        // A directory argument is almost always a mistyped destination.
+        bail!(
+            "`{input}` is a directory, not a torrent file — to choose where \
+             downloads go, use:  -o {input}"
+        );
+    }
     if !path.exists() {
         if input.contains("://") {
             bail!("`{input}` is not a magnet link or a local torrent file");
@@ -294,5 +301,16 @@ mod tests {
 
         let error = parse_source("missing.torrent").unwrap_err().to_string();
         assert!(error.contains("not found"));
+    }
+
+    #[test]
+    fn parse_source_rejects_directories_with_an_output_hint() {
+        // A stray directory argument almost always means the user wanted
+        // `-o`; the error must say so instead of failing mid-queue later.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_string_lossy().into_owned();
+        let error = parse_source(&path).unwrap_err().to_string();
+        assert!(error.contains("is a directory"), "got: {error}");
+        assert!(error.contains("-o"), "should hint at -o: {error}");
     }
 }
