@@ -19,14 +19,24 @@ use crate::peer::extension::{
 use crate::peer::{self, Message};
 use crate::types::{InfoHash, PeerId};
 
-/// Overall attempt budget per peer.
-const PER_PEER_TIMEOUT: Duration = Duration::from_secs(25);
-/// How many peers to try at once.
-const CONCURRENT_ATTEMPTS: usize = 4;
+/// Give up on a peer this long after its last message.
+const READ_TIMEOUT: Duration = Duration::from_secs(15);
+/// Hard cap per peer attempt (generous, for very large metadata).
+const PER_PEER_TIMEOUT: Duration = Duration::from_secs(60);
+/// How many peers to try at once. Most addresses a tracker hands out are
+/// unreachable, so a wide window is what makes resolution fast.
+const CONCURRENT_ATTEMPTS: usize = 24;
+/// Overall budget before giving up entirely.
+const TOTAL_TIMEOUT: Duration = Duration::from_secs(120);
 /// Refuse absurd metadata sizes announced by hostile peers.
 const MAX_METADATA_SIZE: u64 = 32 * 1024 * 1024;
 
 /// Fetch the raw `info` dictionary from any of `peers`.
+///
+/// Attempts run in a sliding window: as soon as one peer fails, the next
+/// address takes its slot, and the first peer to deliver verified metadata
+/// wins. This keeps resolution fast even when most of the swarm is
+/// unreachable, which is normal.
 pub async fn fetch_from_peers(
     peers: &[SocketAddr],
     info_hash: InfoHash,
@@ -37,31 +47,74 @@ pub async fn fetch_from_peers(
         return Err(Error::Metadata("no peers to ask".into()));
     }
 
+    let deadline = tokio::time::Instant::now() + TOTAL_TIMEOUT;
+    let mut remaining = peers.iter().copied();
+    let mut attempts = tokio::task::JoinSet::new();
+    let mut tried = 0usize;
     let mut last_error: Option<Error> = None;
-    for batch in peers.chunks(CONCURRENT_ATTEMPTS) {
-        if cancel.is_cancelled() {
-            return Err(Error::Cancelled);
-        }
-        let mut attempts = tokio::task::JoinSet::new();
-        for &addr in batch {
+
+    loop {
+        // Keep the window full while addresses remain.
+        while attempts.len() < CONCURRENT_ATTEMPTS {
+            let Some(addr) = remaining.next() else { break };
+            tried += 1;
             attempts.spawn(tokio::time::timeout(
                 PER_PEER_TIMEOUT,
                 fetch_from_one_peer(addr, info_hash, our_peer_id),
             ));
         }
-        while let Some(joined) = attempts.join_next().await {
-            match joined {
-                Ok(Ok(Ok(metadata))) => return Ok(metadata),
-                Ok(Ok(Err(err))) => last_error = Some(err),
-                Ok(Err(_elapsed)) => {
-                    last_error = Some(Error::Metadata("peer timed out".into()));
+        if attempts.is_empty() {
+            break; // every address has been tried
+        }
+
+        tokio::select! {
+            joined = attempts.join_next() => {
+                match joined {
+                    Some(Ok(Ok(Ok(metadata)))) => {
+                        attempts.abort_all();
+                        return Ok(metadata);
+                    }
+                    Some(Ok(Ok(Err(err)))) => {
+                        tracing::debug!(error = %err, "metadata attempt failed");
+                        last_error = Some(err);
+                    }
+                    Some(Ok(Err(_elapsed))) => {
+                        last_error = Some(Error::Metadata("peer timed out".into()));
+                    }
+                    Some(Err(join_err)) => {
+                        last_error = Some(Error::Other(join_err.to_string()));
+                    }
+                    None => {}
                 }
-                Err(join_err) => last_error = Some(Error::Other(join_err.to_string())),
+            }
+            _ = tokio::time::sleep_until(deadline) => {
+                attempts.abort_all();
+                return Err(Error::Metadata(format!(
+                    "no peer delivered the metadata within {}s ({tried} peers tried) — \
+                     try again, the swarm may be busy or mostly unreachable",
+                    TOTAL_TIMEOUT.as_secs()
+                )));
+            }
+            _ = cancel.cancelled() => {
+                attempts.abort_all();
+                return Err(Error::Cancelled);
             }
         }
     }
 
-    Err(last_error.unwrap_or_else(|| Error::Metadata("every peer refused".into())))
+    let detail = last_error
+        .map(|e| format!("; last error: {e}"))
+        .unwrap_or_default();
+    Err(Error::Metadata(format!(
+        "asked {tried} peers, none provided metadata{detail}"
+    )))
+}
+
+/// One framed message, or an error if the peer goes quiet.
+async fn read_with_timeout(reader: &mut tokio::net::tcp::OwnedReadHalf) -> Result<Message> {
+    tokio::time::timeout(READ_TIMEOUT, peer::read_message(reader))
+        .await
+        .map_err(|_| Error::Timeout("waiting for the peer to answer".into()))?
 }
 
 async fn fetch_from_one_peer(
@@ -89,7 +142,7 @@ async fn fetch_from_one_peer(
 
     // Wait for the peer's extension handshake, skipping unrelated traffic.
     let (their_metadata_id, metadata_size) = loop {
-        match peer::read_message(&mut reader).await? {
+        match read_with_timeout(&mut reader).await? {
             Message::Extended {
                 id: HANDSHAKE_ID,
                 payload,
@@ -130,7 +183,7 @@ async fn fetch_from_one_peer(
     }
 
     while received_count < piece_count {
-        match peer::read_message(&mut reader).await? {
+        match read_with_timeout(&mut reader).await? {
             Message::Extended {
                 id: OUR_UT_METADATA_ID,
                 payload,
@@ -297,5 +350,106 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(fetched, info);
+    }
+
+    /// Regression test: a mostly-dead swarm must not slow resolution down.
+    /// The window of concurrent attempts has to reach the one live peer
+    /// quickly instead of grinding through dead addresses in batches.
+    #[tokio::test]
+    async fn dead_peers_do_not_block_the_live_one() {
+        let info = test_support::info_dict("y.bin", 16, 16, &Sha1::digest([1u8; 16]));
+        let info_hash = InfoHash(Sha1::digest(&info).into());
+
+        // Dead addresses: bind then drop, so connections are refused.
+        let mut peers = Vec::new();
+        for _ in 0..40 {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            peers.push(listener.local_addr().unwrap());
+        }
+
+        // One live seeder, placed last so every dead address is in the way.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let live_addr = listener.local_addr().unwrap();
+        let info_for_peer = info.clone();
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut hs = [0u8; 68];
+            socket.read_exact(&mut hs).await.unwrap();
+            hs[48..68].copy_from_slice(b"-FK0001-fakefakefake");
+            socket.write_all(&hs).await.unwrap();
+
+            let (mut reader, mut writer) = socket.split();
+            loop {
+                let Ok(msg) = peer::read_message(&mut reader).await else {
+                    return;
+                };
+                match msg {
+                    Message::Extended { id: 0, .. } => {
+                        let mut payload = b"d1:md11:ut_metadatai3ee13:metadata_sizei".to_vec();
+                        payload.extend_from_slice(info_for_peer.len().to_string().as_bytes());
+                        payload.extend_from_slice(b"ee");
+                        peer::write_message(&mut writer, &Message::Extended { id: 0, payload })
+                            .await
+                            .unwrap();
+                    }
+                    Message::Extended { id: 3, payload } => {
+                        if let Ok(MetadataMessage::Request { piece }) =
+                            extension::parse_metadata_message(&payload)
+                        {
+                            let reply = extension::build_metadata_data(
+                                piece,
+                                info_for_peer.len() as u64,
+                                &info_for_peer,
+                            );
+                            peer::write_message(
+                                &mut writer,
+                                &Message::Extended {
+                                    id: OUR_UT_METADATA_ID,
+                                    payload: reply,
+                                },
+                            )
+                            .await
+                            .unwrap();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        });
+        peers.push(live_addr);
+
+        let started = std::time::Instant::now();
+        let fetched = fetch_from_peers(
+            &peers,
+            info_hash,
+            PeerId::generate(),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(fetched, info);
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "40 dead peers slowed resolution to {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn all_dead_peers_fail_with_a_count() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dead = listener.local_addr().unwrap();
+        drop(listener);
+
+        let err = fetch_from_peers(
+            &[dead],
+            InfoHash([2; 20]),
+            PeerId::generate(),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("1 peers"), "got: {err}");
     }
 }

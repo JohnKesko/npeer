@@ -130,7 +130,13 @@ async fn resolve_magnet(ctx: &Ctx, link: &MagnetLink) -> Result<(Arc<Metainfo>, 
     )));
 
     // Fetch the info dictionary from the swarm.
-    let phase = Phase::start(ctx.settings.progress, "Fetching metadata from peers");
+    let phase = Phase::start(
+        ctx.settings.progress,
+        &format!(
+            "Fetching metadata from the swarm ({} peers to try)",
+            peers.len()
+        ),
+    );
     let info_bytes = match metadata::fetch_from_peers(
         &peers,
         link.info_hash,
