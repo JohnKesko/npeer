@@ -10,12 +10,17 @@ web UI, just a clean CLI that does the right thing.
 
 ```text
 ✓ Read debian-13.6.0-amd64-netinst.iso (755 MiB, 3020 pieces)
-⠹ Downloading  debian-13.6.0-amd64-netinst.iso
-  to /home/you/Downloads
-  [========================>             ]  64%  483 MiB / 755 MiB
-  down 3.00 MiB/s (avg 2.96 MiB/s) · up 120 KiB/s · caps ↓3.00 MiB/s
-  peers 31 (12 seeds) · discovered 80 · swarm 512 seeds / 98 peers
-  elapsed 2m 43s · eta 1m 31s · done ~20:46
+⠹ Downloading: debian-13.6.0-amd64-netinst.iso
+To: /home/you/Downloads
+
+[========================>             ]  64%  483 MiB / 755 MiB
+
+down: 3.00 MiB/s (avg 2.96 MiB/s) · cap 3.00 MiB/s
+up: 120 KiB/s
+
+peers 31 (12 seeds) · discovered 80 · swarm 512 seeds / 98 peers
+verified: 1933/3020 pieces
+elapsed 2m 43s · eta 1m 31s · done ~20:46
 ```
 
 ## Features
@@ -32,6 +37,11 @@ web UI, just a clean CLI that does the right thing.
 - **Multi-file torrents** — with safe path handling
 - **Verification** — every piece is SHA-1 checked as it arrives, and
   `npeer verify` re-checks data on disk any time
+- **Poison-resistant** — public swarms often contain peers that feed you
+  garbage on purpose; npeer catches corrupt pieces through the hash
+  check, throws them away, downloads them again from someone else, and
+  disconnects peers caught sending bad data. What lands on your disk is
+  exactly what the torrent's checksums promise
 - **Seeding** — optional, with ratio and time limits
 - **Cross-platform** — Linux, macOS and Windows are first-class
 - **Light** — a single small binary with flat memory use; happy on a
@@ -84,16 +94,22 @@ Not sure which Linux build you need? `uname -m` says `x86_64` or
 
 ## Quick start
 
+There is nothing to set up. Downloads are saved to your computer's
+Downloads folder — the same place your browser puts things.
+
 ```bash
-# Download a torrent file
+# Download a torrent file (saved to your Downloads folder)
 npeer download ubuntu.torrent
 
 # Download a magnet link (note the quotes!)
 npeer download 'magnet:?xt=urn:btih:...&dn=...&tr=...'
 
-# Somewhere specific, with a bandwidth cap
+# Somewhere else instead, with a bandwidth cap
 npeer download ubuntu.torrent -o ~/isos --limit-down 5MiB
 ```
+
+Use `-o` for a one-off destination, or set `download_dir` in the
+config to change the default for good.
 
 > **Always wrap magnet links in quotes.** Shells treat the `&` characters
 > inside a magnet link specially, so an unquoted link is silently cut off
@@ -113,19 +129,42 @@ Press **Ctrl+C** at any time — the download pauses, state is saved, and
 | `npeer peers <torrent\|magnet>` | Ask the trackers who is in the swarm |
 | `npeer list` | All torrents npeer knows about |
 | `npeer status [id]` | Detailed status |
-| `npeer resume <id>` / `--all` | Continue unfinished downloads |
+| `npeer resume [id]` / `--all` | Continue unfinished downloads (no arguments: list them) |
 | `npeer pause <id>` / `stop <id>` | Park a torrent |
 | `npeer remove <id> [--delete-files]` | Forget a torrent |
 | `npeer verify <id>` | Re-check downloaded data against the piece hashes |
 | `npeer config init\|show\|path\|validate` | Manage configuration |
 | `npeer completions <shell>` | Shell completions (bash, zsh, fish, ...) |
 
-Torrent ids are an info-hash prefix or any unique part of the name:
-`npeer resume 481b` and `npeer resume debian` both work.
+**Where do those ids come from?** You never have to hunt for them:
+`npeer list` shows every torrent with its id in the first column, and
+plain `npeer resume` (no arguments) lists everything unfinished together
+with its id. Most of the time you don't even need the id — any unique
+part of the name works too, so `npeer resume debian` does the same as
+`npeer resume 204e`.
+
+```text
+$ npeer resume
+Unfinished downloads:
+
+ID        NAME                              DONE
+204e02b7  debian-13.6.0-amd64-DVD-1.iso     0.7%
+481b6e36  ubuntu-24.04.2-desktop-amd64.iso  62.3%
+9f3ac1d0  raspios-bookworm-arm64.img.xz     18.9%
+
+Resume one:  npeer resume <id or part of the name>
+Resume all:  npeer resume --all
+Remove one:  npeer remove <id>   (--delete-files also deletes its files)
+```
 
 ## Configuration
 
-npeer reads a TOML file from the platform config directory:
+**You don't need a config file.** npeer runs fine without one — every
+setting has a sensible default (Downloads folder, no bandwidth caps, no
+seeding). Create a config only when you want to change something
+permanently.
+
+When you do, npeer reads a TOML file from the platform config directory:
 
 | OS | Path |
 | --- | --- |
