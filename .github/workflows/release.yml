@@ -40,8 +40,10 @@ jobs:
           - target: aarch64-unknown-linux-musl
             runner: ubuntu-24.04-arm
             archive: tar
+          # GitHub retired its Intel macOS runners; Apple Silicon runners
+          # cross-compile x86_64 macOS binaries natively.
           - target: x86_64-apple-darwin
-            runner: macos-13
+            runner: macos-latest
             archive: tar
           - target: aarch64-apple-darwin
             runner: macos-latest
