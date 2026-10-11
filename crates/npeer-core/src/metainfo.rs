@@ -121,10 +121,7 @@ impl Metainfo {
         if pieces_raw.is_empty() || pieces_raw.len() % 20 != 0 {
             return Err(torrent_err("`pieces` is not a sequence of 20-byte hashes"));
         }
-        let pieces: Vec<[u8; 20]> = pieces_raw
-            .chunks_exact(20)
-            .map(|c| c.try_into().unwrap())
-            .collect();
+        let pieces: Vec<[u8; 20]> = pieces_raw.as_chunks::<20>().0.to_vec();
 
         let (files, multi_file) = parse_files(info, &name)?;
         let total_length: u64 = files.iter().map(|f| f.length).sum();

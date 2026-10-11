@@ -82,7 +82,9 @@ pub async fn announce(url: &str, params: &AnnounceParams) -> Result<AnnounceResp
 /// Parse the compact IPv4 peer format: 6 bytes per peer (4 IP + 2 port).
 pub(crate) fn parse_compact_v4(bytes: &[u8]) -> Vec<SocketAddr> {
     bytes
-        .chunks_exact(6)
+        .as_chunks::<6>()
+        .0
+        .iter()
         .map(|c| {
             let ip = std::net::Ipv4Addr::new(c[0], c[1], c[2], c[3]);
             let port = u16::from_be_bytes([c[4], c[5]]);
@@ -95,7 +97,9 @@ pub(crate) fn parse_compact_v4(bytes: &[u8]) -> Vec<SocketAddr> {
 /// Parse the compact IPv6 peer format: 18 bytes per peer (16 IP + 2 port).
 pub(crate) fn parse_compact_v6(bytes: &[u8]) -> Vec<SocketAddr> {
     bytes
-        .chunks_exact(18)
+        .as_chunks::<18>()
+        .0
+        .iter()
         .map(|c| {
             let ip_bytes: [u8; 16] = c[..16].try_into().unwrap();
             let ip = std::net::Ipv6Addr::from(ip_bytes);
