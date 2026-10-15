@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use clap::{Args, Parser, Subcommand};
 
 use crate::config::Overrides;
+use crate::files::{FileChoice, FileList};
 use crate::units;
 
 #[derive(Parser, Debug)]
@@ -41,6 +42,9 @@ pub enum Command {
     Info {
         /// Path to a .torrent file, or a magnet link
         source: String,
+        /// List every file, not just the first 20
+        #[arg(long)]
+        files: bool,
     },
 
     /// List peers reported by the torrent's trackers
@@ -131,6 +135,9 @@ pub struct DownloadArgs {
     pub sources: Vec<String>,
 
     #[command(flatten)]
+    pub files: FileArgs,
+
+    #[command(flatten)]
     pub tuning: TuningArgs,
 }
 
@@ -142,11 +149,37 @@ pub struct ResumeArgs {
     pub id: Option<String>,
 
     /// Resume every unfinished torrent, one after another
-    #[arg(long)]
+    #[arg(long, conflicts_with_all = ["only", "skip"])]
     pub all: bool,
 
     #[command(flatten)]
+    pub files: FileArgs,
+
+    #[command(flatten)]
     pub tuning: TuningArgs,
+}
+
+/// Choosing which files of a torrent to download.
+#[derive(Args, Debug)]
+pub struct FileArgs {
+    /// Download only these files, numbered as `npeer info` lists them,
+    /// e.g. 1,3,5-8 (`all` downloads every file again)
+    #[arg(long, value_name = "FILES", conflicts_with = "skip")]
+    pub only: Option<FileList>,
+
+    /// Download every file except these, e.g. 17,18
+    #[arg(long, value_name = "FILES")]
+    pub skip: Option<FileList>,
+}
+
+impl FileArgs {
+    pub fn choice(&self) -> Option<FileChoice> {
+        match (&self.only, &self.skip) {
+            (Some(list), _) => Some(FileChoice::Only(list.clone())),
+            (_, Some(list)) => Some(FileChoice::Skip(list.clone())),
+            (None, None) => None,
+        }
+    }
 }
 
 /// Flags shared by the commands that run downloads.
@@ -284,6 +317,24 @@ mod tests {
         assert!(Cli::try_parse_from(["npeer", "resume", "--all"]).is_ok());
         assert!(Cli::try_parse_from(["npeer", "resume", "abc"]).is_ok());
         assert!(Cli::try_parse_from(["npeer", "resume", "abc", "--all"]).is_err());
+    }
+
+    #[test]
+    fn file_choice_flags_parse() {
+        let cli = Cli::parse_from(["npeer", "download", "a.torrent", "--skip", "17,18"]);
+        let Some(Command::Download(args)) = cli.command else {
+            panic!("wrong command")
+        };
+        assert_eq!(
+            args.files.choice(),
+            Some(FileChoice::Skip("17,18".parse().unwrap()))
+        );
+
+        assert!(Cli::try_parse_from(["npeer", "get", "a", "--only", "1", "--skip", "2"]).is_err());
+        assert!(Cli::try_parse_from(["npeer", "download", "a", "--only", "0"]).is_err());
+        assert!(Cli::try_parse_from(["npeer", "resume", "abc", "--only", "1-3"]).is_ok());
+        assert!(Cli::try_parse_from(["npeer", "resume", "--all", "--skip", "1"]).is_err());
+        assert!(Cli::try_parse_from(["npeer", "info", "a.torrent", "--files"]).is_ok());
     }
 
     #[test]

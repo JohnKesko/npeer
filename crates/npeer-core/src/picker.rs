@@ -9,6 +9,10 @@
 //! the peer can provide (random among ties). When every missing block is
 //! claimed, endgame mode allows duplicate claims so a few slow peers cannot
 //! stall the last percent.
+//!
+//! Only wanted pieces are scheduled: by default every piece, or just those
+//! holding chosen files (see [`PiecePicker::with_wanted`]). "Complete" means
+//! every wanted piece is verified.
 
 use std::collections::HashMap;
 
@@ -53,6 +57,11 @@ pub struct PiecePicker {
     /// Verified pieces.
     have: Vec<bool>,
     have_count: u32,
+    /// Bytes of chosen files in each piece; zero for pieces not wanted.
+    wanted: Vec<u64>,
+    wanted_count: u32,
+    /// Verified pieces among the wanted ones.
+    wanted_have: u32,
     /// Pieces fully downloaded, awaiting hash verification.
     pending_verify: Vec<bool>,
     /// How many connected peers have each piece.
@@ -62,32 +71,71 @@ pub struct PiecePicker {
 }
 
 impl PiecePicker {
+    /// A picker that wants every piece.
     pub fn new(piece_count: u32, piece_length: u64, total_length: u64, have: Vec<bool>) -> Self {
         assert_eq!(have.len(), piece_count as usize);
         let have_count = have.iter().filter(|&&h| h).count() as u32;
-        PiecePicker {
+        let mut picker = PiecePicker {
             piece_count,
             piece_length,
             total_length,
             have,
             have_count,
+            wanted: Vec::new(),
+            wanted_count: 0,
+            wanted_have: 0,
             pending_verify: vec![false; piece_count as usize],
             availability: vec![0; piece_count as usize],
             partials: HashMap::new(),
             endgame: false,
-        }
+        };
+        let whole_pieces = (0..piece_count).map(|p| picker.piece_size(p)).collect();
+        picker.set_wanted(whole_pieces);
+        picker
+    }
+
+    /// Download only some pieces: `weights` gives the bytes of chosen files
+    /// in each piece, zero for pieces that are not wanted.
+    pub fn with_wanted(mut self, weights: Vec<u64>) -> Self {
+        assert_eq!(weights.len(), self.piece_count as usize);
+        self.set_wanted(weights);
+        self
+    }
+
+    fn set_wanted(&mut self, weights: Vec<u64>) {
+        self.wanted = weights;
+        self.wanted_count = self.wanted.iter().filter(|&&w| w > 0).count() as u32;
+        self.wanted_have = (0..self.piece_count as usize)
+            .filter(|&p| self.have[p] && self.wanted[p] > 0)
+            .count() as u32;
+    }
+
+    fn is_wanted(&self, piece: u32) -> bool {
+        self.wanted[piece as usize] > 0
     }
 
     pub fn piece_count(&self) -> u32 {
         self.piece_count
     }
 
+    /// Verified pieces, wanted or not.
     pub fn have_count(&self) -> u32 {
         self.have_count
     }
 
+    /// Pieces the chosen files need.
+    pub fn wanted_count(&self) -> u32 {
+        self.wanted_count
+    }
+
+    /// Verified pieces among the wanted ones.
+    pub fn wanted_have_count(&self) -> u32 {
+        self.wanted_have
+    }
+
+    /// Every wanted piece is verified.
     pub fn is_complete(&self) -> bool {
-        self.have_count == self.piece_count
+        self.wanted_have == self.wanted_count
     }
 
     pub fn in_endgame(&self) -> bool {
@@ -98,12 +146,17 @@ impl PiecePicker {
         self.have.get(piece as usize).copied().unwrap_or(false)
     }
 
-    /// Verified payload bytes, the number shown as download progress.
+    /// Verified bytes of the chosen files, the number shown as progress.
     pub fn verified_bytes(&self) -> u64 {
-        (0..self.piece_count)
-            .filter(|&p| self.have[p as usize])
-            .map(|p| self.piece_size(p))
+        (0..self.piece_count as usize)
+            .filter(|&p| self.have[p])
+            .map(|p| self.wanted[p])
             .sum()
+    }
+
+    /// Total size of the chosen files.
+    pub fn wanted_bytes(&self) -> u64 {
+        self.wanted.iter().sum()
     }
 
     pub fn piece_size(&self, piece: u32) -> u64 {
@@ -171,8 +224,12 @@ impl PiecePicker {
 
     /// Would we want anything this peer has?
     pub fn is_interesting(&self, bits: &PeerBitfield) -> bool {
-        (0..self.piece_count)
-            .any(|p| bits.has(p) && !self.have[p as usize] && !self.pending_verify[p as usize])
+        (0..self.piece_count).any(|p| {
+            self.is_wanted(p)
+                && bits.has(p)
+                && !self.have[p as usize]
+                && !self.pending_verify[p as usize]
+        })
     }
 
     /// Claim up to `max_blocks` blocks that `peer` can provide.
@@ -282,7 +339,8 @@ impl PiecePicker {
 
         for piece in 0..self.piece_count {
             let index = piece as usize;
-            if self.have[index]
+            if !self.is_wanted(piece)
+                || self.have[index]
                 || self.pending_verify[index]
                 || self.partials.contains_key(&piece)
                 || !bits.has(piece)
@@ -320,7 +378,7 @@ impl PiecePicker {
         // those pieces is claimed or received.
         for piece in 0..self.piece_count {
             let index = piece as usize;
-            if self.have[index] || self.pending_verify[index] {
+            if !self.is_wanted(piece) || self.have[index] || self.pending_verify[index] {
                 continue;
             }
             match self.partials.get(&piece) {
@@ -386,6 +444,9 @@ impl PiecePicker {
         if !self.have[piece as usize] {
             self.have[piece as usize] = true;
             self.have_count += 1;
+            if self.is_wanted(piece) {
+                self.wanted_have += 1;
+            }
         }
         if self.is_complete() {
             self.endgame = false;
@@ -402,9 +463,9 @@ impl PiecePicker {
             .unwrap_or_default()
     }
 
-    /// Blocks still missing or unverified, for progress displays.
+    /// Bytes of the chosen files still missing or unverified.
     pub fn remaining_bytes(&self) -> u64 {
-        self.total_length - self.verified_bytes()
+        self.wanted_bytes() - self.verified_bytes()
     }
 
     pub fn have_vec(&self) -> Vec<bool> {
@@ -588,6 +649,42 @@ mod tests {
         picker.piece_verified(0);
         picker.piece_verified(8);
         assert_eq!(picker.bitfield_bytes(), vec![0b1000_0000, 0b1000_0000]);
+    }
+
+    #[test]
+    fn unwanted_pieces_are_never_picked() {
+        // Piece 1 is not wanted; piece 2 is wanted for 5 of its bytes.
+        let mut picker = picker().with_wanted(vec![32 * 1024, 0, 5]);
+        let bits = full_bitfield(3);
+        picker.peer_has_bitfield(&bits);
+
+        let blocks = picker.pick_blocks(1, &bits, 100);
+        assert_eq!(blocks.len(), 3, "2 blocks of piece 0 + 1 of piece 2");
+        assert!(blocks.iter().all(|b| b.piece != 1));
+        assert_eq!(picker.wanted_bytes(), 32 * 1024 + 5);
+
+        for block in &blocks {
+            picker.block_received(1, block.piece, block.begin, block.length);
+        }
+        picker.piece_verified(0);
+        assert!(!picker.is_complete());
+        picker.piece_verified(2);
+        assert!(picker.is_complete(), "complete without piece 1");
+        assert_eq!(picker.remaining_bytes(), 0);
+        assert_eq!(picker.verified_bytes(), picker.wanted_bytes());
+        // Nothing left to ask anyone for, so no endgame either.
+        assert!(picker.pick_blocks(2, &bits, 100).is_empty());
+        assert!(!picker.in_endgame());
+    }
+
+    #[test]
+    fn only_wanted_pieces_make_a_peer_interesting() {
+        let picker = PiecePicker::new(2, 4, 8, vec![false, false]).with_wanted(vec![4, 0]);
+        let mut bits = PeerBitfield::new(2);
+        bits.set(1);
+        assert!(!picker.is_interesting(&bits), "piece 1 is not wanted");
+        bits.set(0);
+        assert!(picker.is_interesting(&bits));
     }
 
     #[test]

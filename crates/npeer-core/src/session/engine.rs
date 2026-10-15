@@ -105,6 +105,7 @@ pub enum EnginePhase {
 #[derive(Clone, Debug)]
 pub struct Snapshot {
     pub phase: EnginePhase,
+    /// Size of the chosen files (the whole torrent unless some are skipped).
     pub total_bytes: u64,
     pub verified_bytes: u64,
     pub downloaded_session: u64,
@@ -118,6 +119,7 @@ pub struct Snapshot {
     pub discovered_peers: u32,
     pub swarm_seeders: Option<u32>,
     pub swarm_leechers: Option<u32>,
+    /// Verified pieces out of those the chosen files need.
     pub pieces_have: u32,
     pub piece_count: u32,
     /// Pieces that failed their hash check and were downloaded again.
@@ -156,7 +158,7 @@ pub struct EngineSummary {
     pub wasted: u64,
     pub average_rate: u64,
     pub peak_rate: u64,
-    /// All-time upload / content size.
+    /// All-time upload / size of the chosen files.
     pub ratio: f64,
     pub seeded: bool,
     pub have: Vec<bool>,
@@ -193,19 +195,22 @@ impl Engine {
     ) -> Engine {
         let cancel = CancellationToken::new();
         let (events_tx, events_rx) = mpsc::unbounded_channel();
+        // Storage decides what can be kept on disk, so it also decides
+        // which pieces are worth downloading.
         let picker = PiecePicker::new(
             metainfo.piece_count(),
             metainfo.piece_length,
             metainfo.total_length,
             have,
-        );
+        )
+        .with_wanted(storage.piece_weights().to_vec());
         let initial_snapshot = Snapshot {
             phase: if picker.is_complete() {
                 EnginePhase::Seeding
             } else {
                 EnginePhase::Downloading
             },
-            total_bytes: metainfo.total_length,
+            total_bytes: picker.wanted_bytes(),
             verified_bytes: picker.verified_bytes(),
             downloaded_session: 0,
             uploaded_session: 0,
@@ -218,8 +223,8 @@ impl Engine {
             discovered_peers: 0,
             swarm_seeders: None,
             swarm_leechers: None,
-            pieces_have: picker.have_count(),
-            piece_count: picker.piece_count(),
+            pieces_have: picker.wanted_have_count(),
+            piece_count: picker.wanted_count(),
             hash_failures: 0,
             endgame: false,
             elapsed: Duration::ZERO,
@@ -372,7 +377,7 @@ async fn coordinate(
             average_rate: 0,
             peak_rate: 0,
             ratio: shared.options.prior_uploaded as f64
-                / shared.metainfo.total_length.max(1) as f64,
+                / shared.storage.selected_length().max(1) as f64,
             seeded: false,
             have,
         });
@@ -509,7 +514,7 @@ async fn coordinate(
             downloaded
         },
         peak_rate: shared.stats.peak_download_rate(),
-        ratio: all_uploaded as f64 / shared.metainfo.total_length.max(1) as f64,
+        ratio: all_uploaded as f64 / shared.storage.selected_length().max(1) as f64,
         seeded: seeding_since.is_some(),
         have,
     })
@@ -528,8 +533,8 @@ fn publish_snapshot(
         let picker = shared.picker.lock().unwrap();
         (
             picker.verified_bytes(),
-            picker.have_count(),
-            picker.piece_count(),
+            picker.wanted_have_count(),
+            picker.wanted_count(),
             picker.in_endgame(),
         )
     };
@@ -543,7 +548,7 @@ fn publish_snapshot(
 
     let snapshot = Snapshot {
         phase,
-        total_bytes: shared.metainfo.total_length,
+        total_bytes: shared.storage.selected_length(),
         verified_bytes: verified,
         downloaded_session: downloaded,
         uploaded_session: shared.stats.uploaded(),
@@ -584,7 +589,7 @@ fn run_state_hook(shared: &Arc<Shared>, state_hook: &Option<StateHook>, complete
 fn seeding_limits_reached(shared: &Arc<Shared>, seeding_since: Option<Instant>) -> bool {
     let policy = shared.options.seeding;
     let all_uploaded = shared.options.prior_uploaded + shared.stats.uploaded();
-    let ratio = all_uploaded as f64 / shared.metainfo.total_length.max(1) as f64;
+    let ratio = all_uploaded as f64 / shared.storage.selected_length().max(1) as f64;
     if policy.max_ratio > 0.0 && ratio >= policy.max_ratio {
         return true;
     }
@@ -1007,7 +1012,7 @@ async fn handle_message(
                 view.is_seeder = is_seeder;
             }
             if is_seeder && shared.picker.lock().unwrap().is_complete() {
-                return Err(Error::protocol("both sides are seeds"));
+                return Err(Error::protocol("nothing left to exchange with a seed"));
             }
             update_interest(shared, writer, remote_bits, we_interested).await?;
         }

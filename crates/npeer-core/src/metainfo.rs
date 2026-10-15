@@ -170,6 +170,17 @@ impl Metainfo {
         (self.total_length - start).min(self.piece_length)
     }
 
+    /// Pieces holding bytes of file `index`; empty for zero-length files.
+    pub fn file_pieces(&self, index: usize) -> std::ops::Range<u32> {
+        let file = &self.files[index];
+        if file.length == 0 {
+            return 0..0;
+        }
+        let first = file.offset / self.piece_length;
+        let last = (file.offset + file.length - 1) / self.piece_length;
+        first as u32..last as u32 + 1
+    }
+
     /// Every tracker URL, flattened across tiers in order.
     pub fn all_trackers(&self) -> Vec<String> {
         let mut seen = std::collections::HashSet::new();
@@ -298,6 +309,28 @@ pub(crate) mod test_support {
         doc
     }
 
+    /// Parsed multi-file metadata with files `f0.bin`, `f1.bin`, ... of the
+    /// given lengths. Piece hashes are placeholders: fine for layout tests,
+    /// useless for hash checks.
+    pub fn multi_file_meta(lengths: &[u64], piece_length: u64) -> super::Metainfo {
+        let total: u64 = lengths.iter().sum();
+        let pieces = vec![0u8; 20 * total.div_ceil(piece_length) as usize];
+        let mut info = Vec::new();
+        info.extend_from_slice(b"d5:filesl");
+        for (index, length) in lengths.iter().enumerate() {
+            let name = format!("f{index}.bin");
+            info.extend_from_slice(
+                format!("d6:lengthi{length}e4:pathl{}:{name}ee", name.len()).as_bytes(),
+            );
+        }
+        info.extend_from_slice(b"e4:name3:dir");
+        info.extend_from_slice(format!("12:piece lengthi{piece_length}e").as_bytes());
+        info.extend_from_slice(format!("6:pieces{}:", pieces.len()).as_bytes());
+        info.extend_from_slice(&pieces);
+        info.extend_from_slice(b"e");
+        super::Metainfo::from_info_bytes(&info, vec![]).unwrap()
+    }
+
     pub fn info_dict(name: &str, piece_length: u64, length: u64, pieces: &[u8]) -> Vec<u8> {
         let mut info = Vec::new();
         info.extend_from_slice(b"d");
@@ -365,6 +398,16 @@ mod tests {
         assert_eq!(meta.files[0].path, PathBuf::from("a.txt"));
         assert_eq!(meta.files[1].path, PathBuf::from("sub").join("b.txt"));
         assert_eq!(meta.files[1].offset, 10);
+    }
+
+    #[test]
+    fn file_pieces_cover_shared_boundaries() {
+        // 10 + 22 + 0 + 8 bytes in pieces of 16: [0,16) [16,32) [32,40).
+        let meta = test_support::multi_file_meta(&[10, 22, 0, 8], 16);
+        assert_eq!(meta.file_pieces(0), 0..1);
+        assert_eq!(meta.file_pieces(1), 0..2, "shares piece 0 with file 0");
+        assert!(meta.file_pieces(2).is_empty(), "empty files hold no pieces");
+        assert_eq!(meta.file_pieces(3), 2..3);
     }
 
     #[test]

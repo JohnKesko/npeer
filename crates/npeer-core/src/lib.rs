@@ -16,6 +16,7 @@ pub mod metainfo;
 pub mod peer;
 pub mod picker;
 pub mod ratelimit;
+pub mod selection;
 pub mod session;
 pub mod stats;
 pub mod storage;
@@ -28,6 +29,7 @@ pub use error::{Error, Result};
 pub use magnet::MagnetLink;
 pub use metainfo::Metainfo;
 pub use picker::BLOCK_SIZE;
+pub use selection::FileSelection;
 pub use types::{InfoHash, PeerId};
 
 /// Engine version, taken from the crate version.
