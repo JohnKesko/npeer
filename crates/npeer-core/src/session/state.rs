@@ -56,6 +56,11 @@ pub struct TorrentState {
     /// Which files to download; absent when it is every file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selection: Option<StoredSelection>,
+    /// npeer version that last saved this state, so an older version can
+    /// be warned off downloads it may not understand. Set by
+    /// [`StateStore::save`]; absent in states from before it existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saved_by: Option<String>,
 }
 
 /// A choice of files that leaves some out.
@@ -191,7 +196,11 @@ impl StateStore {
     pub fn save(&self, state: &TorrentState) -> Result<()> {
         let path = self.state_path(state.info_hash);
         let tmp = path.with_extension("json.tmp");
-        let json = serde_json::to_vec_pretty(state)
+        let state = TorrentState {
+            saved_by: Some(crate::VERSION.to_owned()),
+            ..state.clone()
+        };
+        let json = serde_json::to_vec_pretty(&state)
             .map_err(|e| Error::Other(format!("encoding state: {e}")))?;
         fs::write(&tmp, json)
             .map_err(|e| Error::Storage(format!("writing {}: {e}", tmp.display())))?;
@@ -333,6 +342,7 @@ mod tests {
             added_at: unix_now(),
             completed_at: None,
             selection: None,
+            saved_by: None,
         };
         state.set_have_pieces(&[true, false, true]);
         state
@@ -407,6 +417,7 @@ mod tests {
 
         let loaded = store.load(state.info_hash).unwrap().unwrap();
         assert_eq!(loaded.name, "ubuntu.iso");
+        assert_eq!(loaded.saved_by.as_deref(), Some(crate::VERSION));
         assert_eq!(
             store.load_torrent_file(state.info_hash).unwrap().unwrap(),
             b"fake-torrent"

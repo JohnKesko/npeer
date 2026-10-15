@@ -274,7 +274,7 @@ change that in the [settings](#settings).
 | `npeer remove <id>` | Forget a download (`--delete-files` deletes its files too) |
 | `npeer verify <id>` | Check downloaded files against the torrent |
 | `npeer config init\|show\|path\|validate` | Create and inspect the settings file |
-| `npeer upgrade` | Update npeer to the newest version |
+| `npeer upgrade` | Update npeer to the newest version (`--beta` for early features) |
 | `npeer completions <shell>` | Set up tab completion for bash, zsh, fish and others |
 
 Add `--help` to any command to see all its options.
@@ -339,6 +339,23 @@ newer version.
 If you installed npeer into `/usr/local/bin` as shown above, run
 `sudo npeer upgrade` instead. npeer tells you if it needs that. Updating
 never touches your downloads or settings.
+
+### Try new features early
+
+Want new features before everyone else? Get the beta version:
+
+```bash
+npeer upgrade --beta
+```
+
+Betas are ready to try, but may still have rough edges.
+
+- `npeer upgrade --beta` gets the newest beta, or a newer stable version
+  if there is one.
+- `npeer upgrade` always gets the stable version. If you're on a beta,
+  it offers to switch you back.
+- When a beta's new features come out in a stable version,
+  `npeer upgrade` gets you that version like everyone else.
 
 ## Raspberry Pi
 

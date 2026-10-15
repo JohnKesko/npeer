@@ -113,6 +113,10 @@ pub enum Command {
     /// Upgrade npeer to the latest released version
     #[cfg(feature = "upgrade")]
     Upgrade {
+        /// Get the newest beta, with new features before everyone else.
+        /// Plain `npeer upgrade` goes back to the stable version.
+        #[arg(long)]
+        beta: bool,
         /// Only check whether a newer version exists
         #[arg(long)]
         check: bool,
@@ -351,11 +355,21 @@ mod tests {
         assert!(matches!(
             cli.command,
             Some(Command::Upgrade {
+                beta: false,
                 check: true,
                 yes: false
             })
         ));
         assert!(Cli::try_parse_from(["npeer", "upgrade", "-y"]).is_ok());
+        let cli = Cli::parse_from(["npeer", "upgrade", "--beta", "--check"]);
+        assert!(matches!(
+            cli.command,
+            Some(Command::Upgrade {
+                beta: true,
+                check: true,
+                ..
+            })
+        ));
     }
 
     #[test]

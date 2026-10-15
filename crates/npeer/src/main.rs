@@ -62,10 +62,10 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             return Ok(ExitCode::SUCCESS);
         }
         #[cfg(feature = "upgrade")]
-        Command::Upgrade { check, yes } => {
+        Command::Upgrade { beta, check, yes } => {
             // Deliberately independent of the config: upgrading must work
             // even when the config file is broken.
-            return commands::upgrade::run(config::ProgressMode::Auto, *check, *yes).await;
+            return commands::upgrade::run(config::ProgressMode::Auto, *check, *yes, *beta).await;
         }
         Command::Config { action } => {
             match action {

@@ -482,6 +482,7 @@ fn save_state_snapshot(
             .unwrap_or_else(unix_now),
         completed_at: previous.as_ref().and_then(|s| s.completed_at),
         selection: None,
+        saved_by: None,
     };
     state.set_have_pieces(have);
     state.set_selection(selection, metainfo);

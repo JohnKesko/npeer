@@ -1,49 +1,76 @@
-//! `npeer upgrade`: replace the running binary with the latest release.
+//! `npeer upgrade`: replace the running binary with a newer release.
 //!
-//! One channel only — GitHub's "latest" release, which never includes
-//! drafts or pre-releases. The flow: discover the newest version, confirm,
-//! download the archive for this platform, verify it against the release's
-//! SHA256SUMS.txt, then swap the running executable in place.
+//! Two channels. Stable (the default) is GitHub's "latest" release, which
+//! never includes drafts or pre-releases. Beta (`--beta`) is the newest
+//! published release of any kind, so it also moves on to a stable release
+//! once that is newer than the beta. Running the stable channel on a beta
+//! offers to switch back, even though stable is then the older version.
+//!
+//! The flow: find the target version, confirm, download the archive for
+//! this platform, verify it against the release's SHA256SUMS.txt, then swap
+//! the running executable in place.
 
+use std::fmt;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
+use npeer_core::session::{StateStore, TorrentState};
+use serde::Deserialize;
 use sha2::Digest;
 
-use crate::config::ProgressMode;
+use crate::config::{self, ProgressMode};
 use crate::ui::Phase;
 use crate::units;
 
 const REPO: &str = "JohnKesko/npeer";
 
-pub async fn run(progress: ProgressMode, check_only: bool, yes: bool) -> Result<ExitCode> {
-    let current_text = env!("CARGO_PKG_VERSION");
-    let current = parse_version(current_text).expect("crate version is well-formed");
+pub async fn run(
+    progress: ProgressMode,
+    check_only: bool,
+    yes: bool,
+    beta: bool,
+) -> Result<ExitCode> {
+    let current = Version::parse(env!("CARGO_PKG_VERSION")).expect("crate version is well-formed");
 
     let phase = Phase::start(progress, "Checking for updates");
-    let latest_tag = match latest_release_tag().await {
-        Ok(tag) => tag,
+    let found = if beta {
+        newest_release().await
+    } else {
+        latest_stable_release().await
+    };
+    let target = match found {
+        Ok(release) => release,
         Err(err) => {
             phase.fail("Could not check for updates");
             return Err(err);
         }
     };
-    let latest = parse_version(&latest_tag)
-        .with_context(|| format!("unexpected release tag `{latest_tag}`"))?;
-    let latest_text = latest_tag.trim_start_matches('v').to_owned();
 
-    if latest <= current {
-        phase.done(Some(&format!("npeer is up to date ({current_text})")));
-        return Ok(ExitCode::SUCCESS);
+    let plan = plan(current, target.version, beta);
+    match plan {
+        Plan::UpToDate => {
+            let note = if beta { "; there is no newer beta" } else { "" };
+            phase.done(Some(&format!("npeer is up to date ({current}){note}")));
+            return Ok(ExitCode::SUCCESS);
+        }
+        Plan::Upgrade => phase.done(Some(&format!(
+            "Update available: {current} → {}",
+            target.version
+        ))),
+        Plan::SwitchBack => phase.done(Some(&format!(
+            "You are on beta {current}. The newest stable version is {}.",
+            target.version
+        ))),
     }
-    phase.done(Some(&format!(
-        "Update available: {current_text} → {latest_text}"
-    )));
 
     if check_only {
-        println!("Run `npeer upgrade` to install it.");
+        match plan {
+            Plan::SwitchBack => println!("Run `npeer upgrade` to switch back to it."),
+            _ if beta => println!("Run `npeer upgrade --beta` to install it."),
+            _ => println!("Run `npeer upgrade` to install it."),
+        }
         return Ok(ExitCode::SUCCESS);
     }
 
@@ -57,13 +84,22 @@ pub async fn run(progress: ProgressMode, check_only: bool, yes: bool) -> Result<
     // Fail before downloading if the binary cannot be replaced anyway.
     let exe = ensure_replaceable()?;
 
-    if !yes && !confirm(&format!("Download and install npeer {latest_text}?"))? {
+    let question = if plan == Plan::SwitchBack {
+        warn_about_newer_downloads(target.version);
+        format!(
+            "Switch back to npeer {}? It is older than the beta you have.",
+            target.version
+        )
+    } else {
+        format!("Download and install npeer {}?", target.version)
+    };
+    if !yes && !confirm(&question)? {
         println!("Not upgrading.");
         return Ok(ExitCode::SUCCESS);
     }
 
     let phase = Phase::start(progress, "Downloading");
-    let (archive, sums) = match download_release_files(asset).await {
+    let (archive, sums) = match download_release_files(&target.tag, asset).await {
         Ok(files) => files,
         Err(err) => {
             phase.fail("Download failed");
@@ -90,7 +126,8 @@ pub async fn run(progress: ProgressMode, check_only: bool, yes: bool) -> Result<
     match install(&exe, &archive) {
         Ok(()) => {
             phase.done(Some(&format!(
-                "npeer is now {latest_text} (replaced {})",
+                "npeer is now {} (replaced {})",
+                target.version,
                 exe.display()
             )));
             Ok(ExitCode::SUCCESS)
@@ -102,15 +139,204 @@ pub async fn run(progress: ProgressMode, check_only: bool, yes: bool) -> Result<
     }
 }
 
-/// `(major, minor, patch)` from "0.1.2" or "v0.1.2".
-fn parse_version(text: &str) -> Option<(u64, u64, u64)> {
-    let mut parts = text.trim().trim_start_matches('v').split('.');
-    let version = (
-        parts.next()?.parse().ok()?,
-        parts.next()?.parse().ok()?,
-        parts.next()?.parse().ok()?,
+/// A release version: `0.2.0`, or a beta of it like `0.2.0-beta.3`.
+/// Field order gives the version order; every beta of 0.2.0 sorts before
+/// 0.2.0 itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct Version {
+    major: u64,
+    minor: u64,
+    patch: u64,
+    stage: Stage,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Stage {
+    Beta(u64),
+    Stable,
+}
+
+impl Version {
+    /// Parse "0.2.0", "v0.2.0" or "v0.2.0-beta.3"; anything else is `None`.
+    fn parse(text: &str) -> Option<Version> {
+        let text = text.trim().trim_start_matches('v');
+        let (numbers, stage) = match text.split_once('-') {
+            Some((numbers, suffix)) => (
+                numbers,
+                Stage::Beta(suffix.strip_prefix("beta.")?.parse().ok()?),
+            ),
+            None => (text, Stage::Stable),
+        };
+        let mut parts = numbers.split('.');
+        let version = Version {
+            major: parts.next()?.parse().ok()?,
+            minor: parts.next()?.parse().ok()?,
+            patch: parts.next()?.parse().ok()?,
+            stage,
+        };
+        parts.next().is_none().then_some(version)
+    }
+
+    fn is_beta(self) -> bool {
+        matches!(self.stage, Stage::Beta(_))
+    }
+}
+
+impl fmt::Display for Version {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}.{}.{}", self.major, self.minor, self.patch)?;
+        match self.stage {
+            Stage::Beta(number) => write!(f, "-beta.{number}"),
+            Stage::Stable => Ok(()),
+        }
+    }
+}
+
+/// A published release: its git tag and the version that tag names.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Release {
+    tag: String,
+    version: Version,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Plan {
+    UpToDate,
+    Upgrade,
+    /// On a beta, asked for stable, and stable is older: go back to it.
+    SwitchBack,
+}
+
+/// What to do, given the newest release on the chosen channel.
+fn plan(current: Version, target: Version, beta: bool) -> Plan {
+    if target > current {
+        Plan::Upgrade
+    } else if current.is_beta() && !beta {
+        Plan::SwitchBack
+    } else {
+        Plan::UpToDate
+    }
+}
+
+/// The current stable release, found by following GitHub's `latest`
+/// redirect — no API token, no rate limits, and pre-releases are never
+/// offered.
+async fn latest_stable_release() -> Result<Release> {
+    let client = reqwest::Client::builder()
+        .user_agent(concat!("npeer/", env!("CARGO_PKG_VERSION")))
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .context("could not build the HTTP client")?;
+    let response = client
+        .get(format!("https://github.com/{REPO}/releases/latest"))
+        .send()
+        .await
+        .context("could not reach github.com")?;
+    let location = response
+        .headers()
+        .get("location")
+        .and_then(|v| v.to_str().ok())
+        .context("GitHub did not answer with a release redirect")?;
+    let tag =
+        tag_from_location(location).context("GitHub's redirect did not name a release tag")?;
+    let version =
+        Version::parse(&tag).with_context(|| format!("unexpected release tag `{tag}`"))?;
+    Ok(Release { tag, version })
+}
+
+fn tag_from_location(location: &str) -> Option<String> {
+    let (_, tag) = location.rsplit_once("/tag/")?;
+    let tag = tag.trim_matches('/');
+    (!tag.is_empty()).then(|| tag.to_owned())
+}
+
+/// One entry of GitHub's release list.
+#[derive(Deserialize)]
+struct ListedRelease {
+    tag_name: String,
+    draft: bool,
+}
+
+/// The newest published release, beta or stable, from GitHub's release
+/// list (newest first, so recent betas are always on the first page).
+async fn newest_release() -> Result<Release> {
+    let client = reqwest::Client::builder()
+        .user_agent(concat!("npeer/", env!("CARGO_PKG_VERSION")))
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .context("could not build the HTTP client")?;
+    let response = client
+        .get(format!(
+            "https://api.github.com/repos/{REPO}/releases?per_page=30"
+        ))
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await
+        .context("could not reach github.com")?;
+    let status = response.status();
+    if status.as_u16() == 403 || status.as_u16() == 429 {
+        bail!("GitHub is limiting how often it can be asked; try again in an hour");
+    }
+    if !status.is_success() {
+        bail!("GitHub's release list answered with HTTP {status}");
+    }
+    let body = response
+        .bytes()
+        .await
+        .context("could not read GitHub's release list")?;
+    let listed: Vec<ListedRelease> =
+        serde_json::from_slice(&body).context("GitHub's release list could not be read")?;
+    newest_of(&listed).context("GitHub lists no npeer releases")
+}
+
+fn newest_of(listed: &[ListedRelease]) -> Option<Release> {
+    listed
+        .iter()
+        .filter(|release| !release.draft)
+        .filter_map(|release| {
+            Some(Release {
+                tag: release.tag_name.clone(),
+                version: Version::parse(&release.tag_name)?,
+            })
+        })
+        .max_by_key(|release| release.version)
+}
+
+/// Before going back to an older version: list unfinished downloads that a
+/// newer npeer saved, since the older one may not continue them correctly.
+fn warn_about_newer_downloads(target: Version) {
+    let Some(store) = config::default_data_dir()
+        .ok()
+        .and_then(|dir| StateStore::open(&dir).ok())
+    else {
+        return;
+    };
+    let at_risk: Vec<TorrentState> = store
+        .list()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|state| state.progress() < 1.0 && saved_by_newer(state, target))
+        .collect();
+    if at_risk.is_empty() {
+        return;
+    }
+    println!(
+        "These unfinished downloads were saved by a newer npeer and may not \
+         continue correctly on {target}:"
     );
-    parts.next().is_none().then_some(version)
+    for state in &at_risk {
+        println!("  {} ({})", state.name, &state.info_hash.to_hex()[..8]);
+    }
+    println!("Finish them first, or remove them and start them again after switching.");
+}
+
+fn saved_by_newer(state: &TorrentState, target: Version) -> bool {
+    state
+        .saved_by
+        .as_deref()
+        .and_then(Version::parse)
+        .is_some_and(|saved_by| saved_by > target)
 }
 
 /// The release asset built for the running platform, if one is published.
@@ -130,42 +356,14 @@ fn release_asset() -> Option<&'static str> {
     }
 }
 
-/// Find the newest release tag by following GitHub's `latest` redirect —
-/// no API token, no rate limits, and pre-releases are never offered.
-async fn latest_release_tag() -> Result<String> {
-    let client = reqwest::Client::builder()
-        .user_agent(concat!("npeer/", env!("CARGO_PKG_VERSION")))
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(std::time::Duration::from_secs(20))
-        .build()
-        .context("could not build the HTTP client")?;
-    let response = client
-        .get(format!("https://github.com/{REPO}/releases/latest"))
-        .send()
-        .await
-        .context("could not reach github.com")?;
-    let location = response
-        .headers()
-        .get("location")
-        .and_then(|v| v.to_str().ok())
-        .context("GitHub did not answer with a release redirect")?;
-    tag_from_location(location).context("GitHub's redirect did not name a release tag")
-}
-
-fn tag_from_location(location: &str) -> Option<String> {
-    let (_, tag) = location.rsplit_once("/tag/")?;
-    let tag = tag.trim_matches('/');
-    (!tag.is_empty()).then(|| tag.to_owned())
-}
-
-async fn download_release_files(asset: &str) -> Result<(Vec<u8>, String)> {
+async fn download_release_files(tag: &str, asset: &str) -> Result<(Vec<u8>, String)> {
     let client = reqwest::Client::builder()
         .user_agent(concat!("npeer/", env!("CARGO_PKG_VERSION")))
         .timeout(std::time::Duration::from_secs(300))
         .build()
         .context("could not build the HTTP client")?;
     let fetch = async |name: &str| -> Result<Vec<u8>> {
-        let url = format!("https://github.com/{REPO}/releases/latest/download/{name}");
+        let url = format!("https://github.com/{REPO}/releases/download/{tag}/{name}");
         let response = client
             .get(&url)
             .send()
@@ -292,16 +490,99 @@ fn confirm(question: &str) -> Result<bool> {
 mod tests {
     use super::*;
 
+    fn v(text: &str) -> Version {
+        Version::parse(text).unwrap()
+    }
+
     #[test]
     fn versions_parse_and_compare() {
-        assert_eq!(parse_version("v0.1.2"), Some((0, 1, 2)));
-        assert_eq!(parse_version("0.10.0"), Some((0, 10, 0)));
-        assert!(parse_version("v0.1").is_none());
-        assert!(parse_version("v0.1.2-rc1").is_none());
-        assert!(parse_version("main").is_none());
-        // Tuple ordering is the version ordering.
-        assert!(parse_version("v0.2.0") > parse_version("v0.1.9"));
-        assert!(parse_version("v0.1.10") > parse_version("v0.1.2"));
+        assert_eq!(v("v0.1.2").to_string(), "0.1.2");
+        assert_eq!(v("0.10.0").to_string(), "0.10.0");
+        assert_eq!(v("v0.2.0-beta.3").to_string(), "0.2.0-beta.3");
+        assert!(Version::parse("v0.1").is_none());
+        assert!(Version::parse("v0.1.2-rc1").is_none());
+        assert!(Version::parse("v0.2.0-beta").is_none());
+        assert!(Version::parse("main").is_none());
+
+        assert!(v("v0.2.0") > v("v0.1.9"));
+        assert!(v("v0.1.10") > v("v0.1.2"));
+        // Betas come after the previous release and before their own.
+        assert!(v("0.2.0-beta.1") > v("0.1.3"));
+        assert!(v("0.2.0-beta.10") > v("0.2.0-beta.9"));
+        assert!(v("0.2.0") > v("0.2.0-beta.10"));
+        assert!(!v("0.2.0").is_beta());
+        assert!(v("0.2.0-beta.1").is_beta());
+    }
+
+    #[test]
+    fn stable_channel_upgrades_or_switches_back() {
+        // Plain stable upgrade, and nothing to do.
+        assert_eq!(plan(v("0.1.3"), v("0.2.0"), false), Plan::Upgrade);
+        assert_eq!(plan(v("0.2.0"), v("0.2.0"), false), Plan::UpToDate);
+        // A beta user gets the stable release once it is out...
+        assert_eq!(plan(v("0.2.0-beta.3"), v("0.2.0"), false), Plan::Upgrade);
+        // ...and can go back to an older stable before then.
+        assert_eq!(plan(v("0.2.0-beta.3"), v("0.1.3"), false), Plan::SwitchBack);
+    }
+
+    #[test]
+    fn beta_channel_takes_the_newest_of_anything() {
+        assert_eq!(plan(v("0.1.3"), v("0.2.0-beta.1"), true), Plan::Upgrade);
+        assert_eq!(
+            plan(v("0.2.0-beta.1"), v("0.2.0-beta.2"), true),
+            Plan::Upgrade
+        );
+        assert_eq!(plan(v("0.2.0-beta.2"), v("0.2.0"), true), Plan::Upgrade);
+        assert_eq!(
+            plan(v("0.2.0-beta.2"), v("0.2.0-beta.2"), true),
+            Plan::UpToDate
+        );
+        assert_eq!(plan(v("0.1.3"), v("0.1.3"), true), Plan::UpToDate);
+    }
+
+    #[test]
+    fn newest_release_skips_drafts_and_unknown_tags() {
+        let listed: Vec<ListedRelease> = serde_json::from_str(
+            r#"[
+                {"tag_name": "v0.3.0", "draft": true},
+                {"tag_name": "nightly", "draft": false},
+                {"tag_name": "v0.2.0-beta.2", "draft": false},
+                {"tag_name": "v0.1.3", "draft": false},
+                {"tag_name": "v0.2.0-beta.10", "draft": false}
+            ]"#,
+        )
+        .unwrap();
+        let newest = newest_of(&listed).unwrap();
+        assert_eq!(newest.tag, "v0.2.0-beta.10");
+        assert_eq!(newest.version, v("0.2.0-beta.10"));
+        assert!(newest_of(&[]).is_none());
+    }
+
+    #[test]
+    fn only_newer_saves_are_at_risk_when_going_back() {
+        let state = |saved_by: Option<&str>| TorrentState {
+            version: 1,
+            info_hash: npeer_core::InfoHash([1; 20]),
+            name: "x".into(),
+            output_dir: PathBuf::from("/tmp"),
+            total_length: 1,
+            piece_count: 1,
+            have: String::new(),
+            downloaded: 0,
+            uploaded: 0,
+            status: npeer_core::session::StoredStatus::Active,
+            added_at: 0,
+            completed_at: None,
+            selection: None,
+            saved_by: saved_by.map(str::to_owned),
+        };
+        let target = v("0.1.3");
+        assert!(saved_by_newer(&state(Some("0.2.0-beta.1")), target));
+        assert!(!saved_by_newer(&state(Some("0.1.3")), target));
+        assert!(
+            !saved_by_newer(&state(None), target),
+            "from before saved_by"
+        );
     }
 
     #[test]
