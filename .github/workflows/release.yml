@@ -1,6 +1,6 @@
-# Release pipeline: push a tag like `v0.1.0` and this workflow tests the
-# code, builds every supported platform, and publishes a GitHub Release
-# with ready-to-run archives.
+# Release pipeline: push a tag like `v0.1.0` (or `v0.2.0-beta.1` for a
+# beta) and this workflow tests the code, builds every supported
+# platform, and publishes a GitHub Release with ready-to-run archives.
 #
 # Adding a platform = adding one matrix entry.
 
@@ -111,9 +111,13 @@ jobs:
       - name: Checksums
         run: cd dist && sha256sum * > SHA256SUMS.txt
 
+      # Tags with a suffix (v0.2.0-beta.1) are betas: published as
+      # pre-releases, so they never become "latest" and only reach
+      # `npeer upgrade --beta`.
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*
           generate_release_notes: true
           draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}

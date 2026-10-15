@@ -5,7 +5,7 @@ use npeer_core::session::{StoredStatus, TorrentState};
 
 use crate::commands::Ctx;
 use crate::ui;
-use crate::units;
+use crate::{files, units};
 
 pub fn list(ctx: &Ctx) -> Result<()> {
     let states = ctx.store.list()?;
@@ -20,7 +20,7 @@ pub fn list(ctx: &Ctx) -> Result<()> {
             vec![
                 short_id(state),
                 units::truncate_name(&state.name, 48),
-                units::bytes(state.total_length),
+                units::bytes(state.selected_length()),
                 format!("{:.1}%", state.progress() * 100.0),
                 status_word(state).to_owned(),
             ]
@@ -53,22 +53,27 @@ pub fn status(ctx: &Ctx, id: Option<&str>) -> Result<()> {
 }
 
 fn print_status(state: &TorrentState) {
-    let have = state.have_pieces().iter().filter(|&&h| h).count();
+    let (have, wanted) = state.piece_progress();
     println!("{}", state.name);
     let row = |label: &str, value: String| println!("  {label:<11} {value}");
     row("id", short_id(state));
     row(
         "status",
         format!(
-            "{} ({:.1}% of {}, {have}/{} pieces)",
+            "{} ({:.1}% of {}, {have}/{wanted} pieces)",
             status_word(state),
             state.progress() * 100.0,
-            units::bytes(state.total_length),
-            state.piece_count,
+            units::bytes(state.selected_length()),
         ),
     );
+    if let Some(selection) = &state.selection {
+        row(
+            "files",
+            format!("skipping {}", files::describe(&selection.skipped_files)),
+        );
+    }
     row("output", state.output_dir.display().to_string());
-    let ratio = state.uploaded as f64 / state.total_length.max(1) as f64;
+    let ratio = state.uploaded as f64 / state.selected_length().max(1) as f64;
     row(
         "transferred",
         format!(

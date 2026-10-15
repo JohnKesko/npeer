@@ -3,6 +3,7 @@
 mod cli;
 mod commands;
 mod config;
+mod files;
 mod ui;
 mod units;
 
@@ -61,10 +62,10 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             return Ok(ExitCode::SUCCESS);
         }
         #[cfg(feature = "upgrade")]
-        Command::Upgrade { check, yes } => {
+        Command::Upgrade { beta, check, yes } => {
             // Deliberately independent of the config: upgrading must work
             // even when the config file is broken.
-            return commands::upgrade::run(config::ProgressMode::Auto, *check, *yes).await;
+            return commands::upgrade::run(config::ProgressMode::Auto, *check, *yes, *beta).await;
         }
         Command::Config { action } => {
             match action {
@@ -94,13 +95,15 @@ async fn run(cli: Cli) -> Result<ExitCode> {
 
     let code = match command {
         Command::Download(args) => {
-            commands::download::run(&ctx, &args.sources, args.tuning.output.clone()).await?
+            let choice = args.files.choice();
+            commands::download::run(&ctx, &args.sources, args.tuning.output.clone(), choice).await?
         }
         Command::Resume(args) => {
-            commands::download::resume(&ctx, args.id.as_deref(), args.all).await?
+            let choice = args.files.choice();
+            commands::download::resume(&ctx, args.id.as_deref(), args.all, choice).await?
         }
-        Command::Info { source } => {
-            commands::info::run(&ctx, &source).await?;
+        Command::Info { source, files } => {
+            commands::info::run(&ctx, &source, files).await?;
             ExitCode::SUCCESS
         }
         Command::Peers { source } => {

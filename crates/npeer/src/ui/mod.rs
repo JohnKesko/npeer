@@ -351,7 +351,8 @@ impl VerifyUi {
             );
             VerifyUi { bar: Some(bar) }
         } else {
-            println!("Verifying {piece_count} pieces...");
+            let pieces = if piece_count == 1 { "piece" } else { "pieces" };
+            println!("Verifying {piece_count} {pieces}...");
             VerifyUi { bar: None }
         }
     }
@@ -374,8 +375,8 @@ pub fn print_summary(
     name: &str,
     content_path: &Path,
     summary: &EngineSummary,
-    total_bytes: u64,
-    piece_count: u32,
+    size: &str,
+    piece_count: usize,
     seeding_configured: bool,
 ) {
     if summary.complete {
@@ -387,7 +388,7 @@ pub fn print_summary(
 
     let row = |label: &str, value: String| println!("  {label:<14} {value}");
     row("saved to", content_path.display().to_string());
-    row("size", units::bytes(total_bytes));
+    row("size", size.to_owned());
     row("time", units::duration(summary.elapsed));
     row(
         "average speed",

@@ -9,22 +9,27 @@ use crate::error::{Error, Result};
 use crate::metainfo::Metainfo;
 use crate::storage::Storage;
 
-/// Re-hash every piece on disk and report which ones are good.
+/// Re-hash the pieces marked in `check` and report which ones are good;
+/// pieces not checked are reported as missing.
 ///
 /// `progress` is called with (checked, total) as pieces complete. Runs on the
 /// blocking pool; cancellation is checked between pieces.
 pub async fn verify_pieces(
     storage: Arc<Storage>,
     metainfo: Arc<Metainfo>,
+    check: Vec<bool>,
     cancel: CancellationToken,
     progress: impl Fn(u32, u32) + Send + 'static,
 ) -> Result<Vec<bool>> {
     let piece_count = metainfo.piece_count();
+    assert_eq!(check.len(), piece_count as usize);
+    let total = check.iter().filter(|&&c| c).count() as u32;
     tokio::task::spawn_blocking(move || {
         let mut have = vec![false; piece_count as usize];
         let mut buffer = vec![0u8; metainfo.piece_length as usize];
+        let mut checked = 0;
 
-        for piece in 0..piece_count {
+        for piece in (0..piece_count).filter(|&p| check[p as usize]) {
             if cancel.is_cancelled() {
                 return Err(Error::Cancelled);
             }
@@ -39,7 +44,8 @@ pub async fn verify_pieces(
                 Err(_) => false,
             };
             have[piece as usize] = ok;
-            progress(piece + 1, piece_count);
+            checked += 1;
+            progress(checked, total);
         }
         Ok(have)
     })
@@ -78,12 +84,25 @@ mod tests {
         let have = verify_pieces(
             storage.clone(),
             metainfo.clone(),
+            vec![true; 3],
             CancellationToken::new(),
             |_, _| {},
         )
         .await
         .unwrap();
         assert_eq!(have, vec![true, false, true]);
+
+        // Unchecked pieces count as missing, however good they are.
+        let have = verify_pieces(
+            storage.clone(),
+            metainfo.clone(),
+            vec![false, true, true],
+            CancellationToken::new(),
+            |_, _| {},
+        )
+        .await
+        .unwrap();
+        assert_eq!(have, vec![false, false, true]);
         assert!(verify_single_piece(&storage, &metainfo, 0).unwrap());
         assert!(!verify_single_piece(&storage, &metainfo, 1).unwrap());
     }
@@ -99,7 +118,7 @@ mod tests {
 
         let cancel = CancellationToken::new();
         cancel.cancel();
-        let result = verify_pieces(storage, metainfo, cancel, |_, _| {}).await;
+        let result = verify_pieces(storage, metainfo, vec![true; 4], cancel, |_, _| {}).await;
         assert!(matches!(result, Err(Error::Cancelled)));
     }
 }

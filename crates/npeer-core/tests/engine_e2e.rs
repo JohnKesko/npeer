@@ -8,6 +8,7 @@ use std::time::Duration;
 use sha1::{Digest, Sha1};
 use tokio::net::{TcpListener, UdpSocket};
 
+use npeer_core::FileSelection;
 use npeer_core::metainfo::Metainfo;
 use npeer_core::peer::{Message, read_message, write_message};
 use npeer_core::session::{Engine, EngineOptions, StopReason};
@@ -207,6 +208,52 @@ async fn engine_downloads_from_local_seeder() {
     let b = std::fs::read(dir.path().join("testdata/sub/b.bin")).unwrap();
     assert_eq!(a, swarm.data[..first_len]);
     assert_eq!(b, swarm.data[first_len..]);
+}
+
+#[tokio::test]
+async fn engine_downloads_only_chosen_files() {
+    let swarm = start_swarm(32 * 1024, 200_000).await; // a.bin ends inside piece 4
+    let dir = tempfile::tempdir().unwrap();
+    let parts = dir.path().join("parts");
+    let skip_b = FileSelection::skipping(2, &[1]);
+    let storage = Arc::new(Storage::plan_selected(
+        dir.path(),
+        &swarm.metainfo,
+        &skip_b,
+        &parts,
+    ));
+    storage.open_all().unwrap();
+
+    let first_len = swarm.data.len() * 2 / 3;
+    let have = vec![false; swarm.metainfo.piece_count() as usize];
+    let engine = Engine::start(
+        swarm.metainfo.clone(),
+        storage.clone(),
+        have,
+        engine_options(),
+        None,
+    );
+    assert_eq!(engine.progress().borrow().total_bytes, first_len as u64);
+
+    let summary = tokio::time::timeout(Duration::from_secs(30), engine.wait())
+        .await
+        .expect("download should finish quickly")
+        .unwrap();
+    assert!(summary.complete);
+    assert_eq!(summary.stop_reason, StopReason::Complete);
+
+    // Just the pieces holding a.bin, including the one it shares with b.bin.
+    let wanted_pieces = first_len.div_ceil(32 * 1024);
+    assert_eq!(summary.have.iter().filter(|&&h| h).count(), wanted_pieces);
+    assert!(summary.downloaded < swarm.data.len() as u64);
+
+    let a = std::fs::read(dir.path().join("testdata/a.bin")).unwrap();
+    assert_eq!(a, swarm.data[..first_len]);
+    assert!(!dir.path().join("testdata/sub/b.bin").exists());
+    assert!(
+        parts.join("1.part").exists(),
+        "b.bin's share of the shared piece"
+    );
 }
 
 #[tokio::test]

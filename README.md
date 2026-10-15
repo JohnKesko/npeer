@@ -1,12 +1,12 @@
 # npeer
 
-A fast, friendly BitTorrent client for the command line.
+A simple, fast way to download torrents from the command line.
 
 [![CI](https://github.com/JohnKesko/npeer/actions/workflows/ci.yml/badge.svg)](https://github.com/JohnKesko/npeer/actions/workflows/ci.yml)
 
-npeer downloads torrent files and magnet links with a live progress display,
-automatic resume, bandwidth limits and sensible defaults — no daemon, no
-web UI, just a clean CLI that does the right thing.
+Give npeer a torrent file or a magnet link and it downloads it, showing
+you how it's going. Stop any time and continue later. There is nothing
+to set up first.
 
 ```text
 ✓ Read debian-13.6.0-amd64-netinst.iso (755 MiB, 3020 pieces)
@@ -23,36 +23,52 @@ verified: 1933/3020 pieces
 elapsed 2m 43s · eta 1m 31s · done ~20:46
 ```
 
-## Features
+**Contents**
 
-- **Torrents and magnets** — `.torrent` files, and magnet links resolved
-  through the swarm (BEP 9 / BEP 10 metadata exchange)
-- **Automatic resume** — interrupted downloads continue where they left off;
-  Ctrl+C saves state and exits cleanly
-- **Live progress** — speeds, peers, ETA and expected completion time,
-  updating in place without flooding your terminal
-- **Bandwidth limits** — `--limit-down 5MiB`, `--limit-up 500KiB`, or set
-  them once in the config file
-- **HTTP(S) and UDP trackers** — including multi-tracker torrents (BEP 12)
-- **Multi-file torrents** — with safe path handling
-- **Verification** — every piece is SHA-1 checked as it arrives, and
-  `npeer verify` re-checks data on disk any time
-- **Poison-resistant** — public swarms often contain peers that feed you
-  garbage on purpose; npeer catches corrupt pieces through the hash
-  check, throws them away, downloads them again from someone else, and
-  disconnects peers caught sending bad data. What lands on your disk is
-  exactly what the torrent's checksums promise
-- **Seeding** — optional, with ratio and time limits
-- **Cross-platform** — Linux, macOS and Windows are first-class
-- **Light** — a single small binary with flat memory use; happy on a
-  Raspberry Pi or any little always-on box
+- [What it can do](#what-it-can-do)
+- [Install](#install)
+- [How to use](#how-to-use)
+  - [Download a torrent](#download-a-torrent) ·
+    [Download a magnet link](#download-a-magnet-link) ·
+    [See what's inside a torrent](#see-whats-inside-a-torrent) ·
+    [Download only some files](#download-only-some-files)
+  - [Pause and continue](#pause-and-continue) ·
+    [See your downloads](#see-your-downloads) ·
+    [Choose where files go](#choose-where-files-go) ·
+    [Limit the speed](#limit-the-speed)
+  - [Check your files](#check-your-files) ·
+    [Remove a download](#remove-a-download) ·
+    [Keep sharing after you finish](#keep-sharing-after-you-finish)
+- [All commands](#all-commands)
+- [Settings](#settings)
+- [Update npeer](#update-npeer)
+- [Raspberry Pi](#raspberry-pi)
+- [For developers](#for-developers)
+
+## What it can do
+
+- **Torrent files and magnet links** both work.
+- **Pick your files.** From a torrent with many files, download only the
+  ones you want.
+- **Pause and continue.** Press Ctrl+C to pause. Pick up where you left
+  off later, even after restarting your computer.
+- **Live progress.** See the speed, how much is done and when it will
+  finish.
+- **Speed limits**, so downloads don't use up your whole connection.
+- **Safe downloads.** Every part is checked as it arrives. Broken or fake
+  data is thrown away and fetched again from someone else, so what ends
+  up on your disk is exactly what the torrent promised.
+- **Sharing back** after your download finishes, if you want to.
+- **Works on Linux, macOS and Windows.**
+- **Small and light.** One small program that uses little memory. Great
+  on a Raspberry Pi.
 
 ## Install
 
-npeer is one self-contained binary — download it, put it on your PATH,
-done. No runtime, no dependencies.
+npeer is a single program file. Download it and move it to a folder
+where your computer looks for programs.
 
-**Linux (regular PC, x86_64):**
+**Linux, regular PC:**
 
 ```bash
 curl -LO https://github.com/JohnKesko/npeer/releases/latest/download/npeer-x86_64-unknown-linux-musl.tar.gz
@@ -60,7 +76,7 @@ tar -xzf npeer-x86_64-unknown-linux-musl.tar.gz
 sudo mv npeer-x86_64-unknown-linux-musl/npeer /usr/local/bin/
 ```
 
-**Linux (ARM64 — Raspberry Pi, ARM servers):**
+**Linux, Raspberry Pi and other ARM machines:**
 
 ```bash
 curl -LO https://github.com/JohnKesko/npeer/releases/latest/download/npeer-aarch64-unknown-linux-musl.tar.gz
@@ -68,146 +84,212 @@ tar -xzf npeer-aarch64-unknown-linux-musl.tar.gz
 sudo mv npeer-aarch64-unknown-linux-musl/npeer /usr/local/bin/
 ```
 
-**macOS:** download `npeer-aarch64-apple-darwin.tar.gz` (Apple Silicon)
-or `npeer-x86_64-apple-darwin.tar.gz` (Intel) from the
-[latest release](https://github.com/JohnKesko/npeer/releases/latest),
-unpack, and move `npeer` somewhere on your PATH. If macOS blocks a
-browser-downloaded binary, clear the quarantine flag:
+Not sure which one you need? Run `uname -m`. It says `x86_64` for a
+regular PC or `aarch64` for ARM.
+
+**macOS, Apple Silicon (M1 and newer):**
 
 ```bash
-xattr -d com.apple.quarantine ./npeer
+curl -LO https://github.com/JohnKesko/npeer/releases/latest/download/npeer-aarch64-apple-darwin.tar.gz
+tar -xzf npeer-aarch64-apple-darwin.tar.gz
+sudo mkdir -p /usr/local/bin
+sudo mv npeer-aarch64-apple-darwin/npeer /usr/local/bin/
 ```
+
+On an Intel Mac, use `npeer-x86_64-apple-darwin` instead in all three
+places. If you download the file with a web browser instead and macOS
+refuses to open it, run `xattr -d com.apple.quarantine ./npeer` once.
 
 **Windows:** download `npeer-x86_64-pc-windows-msvc.zip` from the
 [latest release](https://github.com/JohnKesko/npeer/releases/latest),
-unzip it, and run `npeer.exe` (add its folder to your PATH to call it
-from anywhere).
+unzip it, and run `npeer.exe`. To run it from any folder, add its folder
+to your PATH.
 
-**With cargo** (any platform with Rust installed):
+**With Rust's cargo**, on any system:
 
 ```bash
 cargo install --git https://github.com/JohnKesko/npeer npeer
 ```
 
-Not sure which Linux build you need? `uname -m` says `x86_64` or
-`aarch64` — pick the matching file.
+## How to use
 
-## Updating
-
-After the first install, updating is one command:
+### Download a torrent
 
 ```bash
-npeer upgrade
+npeer download nature-sounds.torrent
 ```
 
-npeer looks up the newest published release, downloads the right file
-for your machine, verifies its checksum, and replaces itself. Use
-`npeer upgrade --check` to only find out whether something newer exists.
+Files go to your Downloads folder, the same place your web browser puts
+things. While it runs you see the speed, how much is done and when it
+will finish. Give several torrents and they download one after another.
 
-Which flavor of that command you need depends on how you installed:
-
-- **Downloaded a binary to `/usr/local/bin`** (the install commands
-  above): that folder belongs to root, so run `sudo npeer upgrade`.
-  npeer detects this itself and tells you.
-- **Installed with cargo** (`cargo install --git ...`): the binary lives
-  in your own home folder (`~/.cargo/bin`), so plain `npeer upgrade`
-  works without sudo — and it's much faster than recompiling, because it
-  swaps in the official pre-built binary. Re-running your original
-  `cargo install` command with `--force` also still works if you prefer
-  building from source.
-
-Your downloads, resume data and configuration are never touched by an
-update.
-
-For package maintainers: build with `--no-default-features` to leave the
-`upgrade` command out, so updating stays in the package manager's hands.
-
-## Quick start
-
-There is nothing to set up. Downloads are saved to your computer's
-Downloads folder — the same place your browser puts things.
+### Download a magnet link
 
 ```bash
-# Download a torrent file (saved to your Downloads folder)
-npeer download ubuntu.torrent
-
-# Download a magnet link (note the quotes!)
 npeer download 'magnet:?xt=urn:btih:...&dn=...&tr=...'
-
-# Somewhere else instead, with a bandwidth cap
-npeer download ubuntu.torrent -o ~/isos --limit-down 5MiB
 ```
 
-Use `-o` for a one-off destination, or set `download_dir` in the
-config to change the default for good.
+**Always put magnet links in quotes.** Without them, your terminal cuts
+the link short at the first `&` and npeer can't find anyone to download
+from. Use single quotes on Linux and macOS, double quotes on Windows. If
+you forget, npeer notices and tells you.
 
-> **Always wrap magnet links in quotes.** Shells treat the `&` characters
-> inside a magnet link specially, so an unquoted link is silently cut off
-> at the first `&` and loses its trackers. Use single quotes on Linux and
-> macOS, double quotes on Windows. If you forget, npeer notices the
-> truncated link and reminds you.
+### See what's inside a torrent
 
-Press **Ctrl+C** at any time — the download pauses, state is saved, and
-`npeer resume <id>` (or `npeer resume --all`) picks it back up.
+`npeer info` shows the name, the size and every file in the torrent,
+without downloading anything:
 
-## Commands
+```text
+$ npeer info nature-sounds.torrent
+✓ Read Nature Sounds Collection (413 MiB, 1652 pieces)
+
+Name         Nature Sounds Collection
+Info hash    5b1f0c9e7a3d4b2c8e6f1a0d9c7b5e3f2a4c6d8e
+Size         413 MiB (1652 pieces of 256 KiB)
+Files        6
+Trackers     udp://tracker.example.org:6969
+Private      no
+
+#  SIZE      FILE
+1  98.2 MiB  01 Rain on a Tin Roof.flac
+2  87.5 MiB  02 Ocean Waves.flac
+3  76.1 MiB  03 Forest at Dawn.flac
+4  91.4 MiB  04 Thunderstorm.flac
+5  58.6 MiB  05 Mountain Stream.flac
+6  1.20 MiB  cover.jpg
+
+Download only some files by their number:
+  npeer download nature-sounds.torrent --only 1-3
+  npeer download nature-sounds.torrent --skip 6
+```
+
+The `#` column is npeer's number for each file. You use it to pick
+files, as shown next. Torrents with more than 20 files show the first
+20; add `--files` to see them all.
+
+### Download only some files
+
+Pick files by their number from `npeer info`:
+
+```bash
+# Only files 1, 2 and 3
+npeer download nature-sounds.torrent --only 1-3
+
+# Everything except the cover picture (file 6)
+npeer download nature-sounds.torrent --skip 6
+```
+
+You can list numbers like `1,3,5-8`.
+
+- Files you skip never show up in your download folder.
+- npeer remembers your choice when you continue the download later.
+- To change your mind, run the download again with a new `--only` or
+  `--skip`. Use `--only all` to get every file.
+
+### Pause and continue
+
+Press **Ctrl+C** to pause. npeer saves where it got to. Later:
+
+```bash
+npeer resume            # show unfinished downloads
+npeer resume nature     # continue one of them
+npeer resume --all      # continue all of them
+```
+
+### See your downloads
+
+```bash
+npeer list              # every download and how far along it is
+npeer status nature     # all the details about one download
+```
+
+```text
+$ npeer list
+ID        NAME                             SIZE     DONE    STATUS
+5b1f0c9e  Nature Sounds Collection         262 MiB  100.0%  completed
+c7a2e410  debian-13.6.0-amd64-netinst.iso  755 MiB  64.0%   incomplete
+```
+
+The first column is the download's id. Whenever a command asks for an
+id, you can also type any part of the name instead, like `nature` above.
+
+### Choose where files go
+
+```bash
+npeer download nature-sounds.torrent -o ~/Music
+```
+
+To change the folder for good, set `download_dir` in the
+[settings](#settings).
+
+### Limit the speed
+
+```bash
+npeer download nature-sounds.torrent --limit-down 5MiB --limit-up 500KiB
+```
+
+`5MiB` means about 5 megabytes per second. To always use a limit, put it
+in the [settings](#settings).
+
+### Check your files
+
+```bash
+npeer verify nature
+```
+
+This checks everything on disk against the torrent. If anything is
+broken, `npeer resume nature` downloads just the broken parts again.
+
+### Remove a download
+
+```bash
+npeer remove nature                  # npeer forgets it, your files stay
+npeer remove nature --delete-files   # also deletes the files
+```
+
+### Keep sharing after you finish
+
+By default npeer stops as soon as your download is done. To keep
+sharing it with others for a while:
+
+```bash
+npeer download nature-sounds.torrent --seed
+```
+
+It stops once you have uploaded as much as the download's size. You can
+change that in the [settings](#settings).
+
+## All commands
 
 | Command | What it does |
 | --- | --- |
-| `npeer download <torrent\|magnet>` | Download (aliases: `add`, `get`) |
-| `npeer info <torrent\|magnet>` | Show name, size, pieces, trackers, files |
-| `npeer peers <torrent\|magnet>` | Ask the trackers who is in the swarm |
-| `npeer list` | All torrents npeer knows about |
-| `npeer status [id]` | Detailed status |
-| `npeer resume [id]` / `--all` | Continue unfinished downloads (no arguments: list them) |
-| `npeer pause <id>` / `stop <id>` | Park a torrent |
-| `npeer remove <id> [--delete-files]` | Forget a torrent |
-| `npeer verify <id>` | Re-check downloaded data against the piece hashes |
-| `npeer config init\|show\|path\|validate` | Manage configuration |
-| `npeer upgrade` | Update npeer itself to the latest release |
-| `npeer completions <shell>` | Shell completions (bash, zsh, fish, ...) |
+| `npeer download <torrent\|magnet>` | Download. `--only` / `--skip` pick files. Also `npeer add` or `npeer get` |
+| `npeer info <torrent\|magnet>` | Show what's inside, with numbered files |
+| `npeer peers <torrent\|magnet>` | Show who is sharing a torrent right now |
+| `npeer list` | List all your downloads |
+| `npeer status [id]` | Show details about downloads |
+| `npeer resume [id]` / `--all` | Continue unfinished downloads |
+| `npeer pause <id>` | Mark a download as paused |
+| `npeer stop <id>` | Mark a download as stopped, so `resume --all` leaves it alone |
+| `npeer remove <id>` | Forget a download (`--delete-files` deletes its files too) |
+| `npeer verify <id>` | Check downloaded files against the torrent |
+| `npeer config init\|show\|path\|validate` | Create and inspect the settings file |
+| `npeer upgrade` | Update npeer to the newest version (`--beta` for early features) |
+| `npeer completions <shell>` | Set up tab completion for bash, zsh, fish and others |
 
-**Where do those ids come from?** You never have to hunt for them:
-`npeer list` shows every torrent with its id in the first column, and
-plain `npeer resume` (no arguments) lists everything unfinished together
-with its id. Most of the time you don't even need the id — any unique
-part of the name works too, so `npeer resume debian` does the same as
-`npeer resume 204e`.
+Add `--help` to any command to see all its options.
 
-```text
-$ npeer resume
-Unfinished downloads:
+## Settings
 
-ID        NAME                              DONE
-204e02b7  debian-13.6.0-amd64-DVD-1.iso     0.7%
-481b6e36  ubuntu-24.04.2-desktop-amd64.iso  62.3%
-9f3ac1d0  raspios-bookworm-arm64.img.xz     18.9%
-
-Resume one:  npeer resume <id or part of the name>
-Resume all:  npeer resume --all
-Remove one:  npeer remove <id>   (--delete-files also deletes its files)
-```
-
-## Configuration
-
-**You don't need a config file.** npeer runs fine without one — every
-setting has a sensible default (Downloads folder, no bandwidth caps, no
-seeding). Create a config only when you want to change something
-permanently.
-
-When you do, npeer reads a TOML file from the platform config directory:
-
-| OS | Path |
-| --- | --- |
-| Linux | `~/.config/npeer/config.toml` |
-| macOS | `~/Library/Application Support/npeer/config.toml` |
-| Windows | `%APPDATA%\npeer\config.toml` |
-
-Create a documented starter file with:
+**You don't need a settings file.** Without one, npeer saves to your
+Downloads folder, has no speed limits and doesn't keep sharing after a
+download. Create one only if you want to change something for good:
 
 ```bash
 npeer config init
 ```
+
+This creates a file with every setting explained. The most useful ones:
 
 ```toml
 [general]
@@ -223,76 +305,111 @@ download = "unlimited"    # e.g. "5MiB", "500KiB", "8MB"
 upload = "unlimited"
 
 [seeding]
-enabled = false           # keep seeding after completion
-max_ratio = 1.0           # stop at this upload ratio (0 = no limit)
-max_minutes = 0           # stop after this long (0 = no limit)
+enabled = false           # keep sharing after a download finishes
+max_ratio = 1.0           # stop after uploading this many times its size (0 = no limit)
+max_minutes = 0           # stop after this many minutes (0 = no limit)
 ```
 
-Precedence, highest first:
+The file lives here:
 
-1. Command-line flags (`-o`, `--limit-down`, `--port`, ...)
-2. Environment variables (`NPEER_DOWNLOAD_DIR`, `NPEER_LIMIT_DOWN`,
-   `NPEER_LIMIT_UP`, `NPEER_PORT`, `NPEER_MAX_PEERS`, `NPEER_SEED`)
-3. `config.toml`
-4. Built-in defaults
+| System | Path |
+| --- | --- |
+| Linux | `~/.config/npeer/config.toml` |
+| macOS | `~/Library/Application Support/npeer/config.toml` |
+| Windows | `%APPDATA%\npeer\config.toml` |
 
-Bandwidth values accept binary units (`5MiB`, `500KiB`, `1.5M` — powers of
-1024), decimal units (`8MB` — powers of 1000), an optional `/s` suffix, and
-`unlimited`.
+Options you type on the command line always win. Next come these
+environment variables: `NPEER_DOWNLOAD_DIR`, `NPEER_LIMIT_DOWN`,
+`NPEER_LIMIT_UP`, `NPEER_PORT`, `NPEER_MAX_PEERS` and `NPEER_SEED`. The
+settings file comes last.
 
-## Runs great on a Raspberry Pi
+Speeds can be written as `5MiB` or `500KiB` (counting in 1024s), `8MB`
+(counting in 1000s), or `unlimited`.
 
-A Pi (or any small always-on machine) and npeer are a natural pair:
-start a big download over SSH, disconnect, and let it finish overnight.
-npeer is one small binary, uses very little memory no matter how large
-the torrent is, and `npeer resume --all` picks everything up after a
-reboot or power cut — you can even run that automatically at boot.
-
-The step-by-step guide — installing, keeping downloads running after
-you log out, and auto-resuming after reboots — is in
-[docs/raspberry-pi.md](docs/raspberry-pi.md).
-
-## Where things live
-
-Downloaded files go to your Downloads folder (or wherever you point
-`-o` / `download_dir`). Application state — resume data and torrent
-metadata — lives separately in the platform data directory, so your
-downloads are never mixed with npeer's bookkeeping.
-
-## Architecture
-
-npeer is a two-crate workspace:
-
-- **`npeer-core`** — the engine: bencoding, torrent/magnet parsing,
-  HTTP and UDP trackers, the peer wire protocol with extensions,
-  piece scheduling (rarest-first with endgame mode), storage,
-  verification and session state. It has no CLI or terminal
-  dependencies, so it can power other frontends.
-- **`npeer`** — the CLI: argument parsing, configuration, and the
-  live terminal interface.
-
-## Building from source
+## Update npeer
 
 ```bash
-cargo build --release        # binary at target/release/npeer
-cargo test                   # unit + end-to-end tests (local swarm, no internet)
+npeer upgrade
+```
+
+npeer downloads the newest version, checks that it arrived intact, and
+replaces itself. `npeer upgrade --check` only tells you if there is a
+newer version.
+
+If you installed npeer into `/usr/local/bin` as shown above, run
+`sudo npeer upgrade` instead. npeer tells you if it needs that. Updating
+never touches your downloads or settings.
+
+### Try new features early
+
+Want new features before everyone else? Get the beta version:
+
+```bash
+npeer upgrade --beta
+```
+
+Betas are ready to try, but may still have rough edges.
+
+- `npeer upgrade --beta` gets the newest beta, or a newer stable version
+  if there is one.
+- `npeer upgrade` always gets the stable version. If you're on a beta,
+  it offers to switch you back.
+- When a beta's new features come out in a stable version,
+  `npeer upgrade` gets you that version like everyone else.
+
+## Raspberry Pi
+
+A Raspberry Pi, or any small computer that is always on, is a great home
+for npeer. Start a big download, log out, and let it finish overnight.
+`npeer resume --all` continues everything after a restart or power cut.
+
+The step-by-step guide covers installing, keeping downloads running
+after you log out, and continuing automatically after a restart:
+[docs/raspberry-pi.md](docs/raspberry-pi.md).
+
+## Where npeer keeps things
+
+Your downloaded files go to your Downloads folder, or wherever you
+choose. npeer's own records are kept in a separate folder, so they never
+mix with your files. That includes what it has downloaded so far, a copy
+of each torrent, and small leftovers of files you chose to skip.
+
+## For developers
+
+### Build from source
+
+```bash
+cargo build --release        # the program ends up in target/release/npeer
+cargo test                   # all tests, run locally without internet
 ```
 
 Requires Rust 1.88 or newer.
 
-## Roadmap
+Package maintainers can build with `--no-default-features` to leave out
+`npeer upgrade`, so updates stay with the package manager.
 
-- DHT, PEX and local service discovery (config keys are reserved)
-- Accepting incoming peer connections
-- A daemon mode with a remote API, and a TUI on top of `npeer-core`
+### How the code is organized
+
+- **`npeer-core`** is the engine: reading torrents and magnet links,
+  talking to trackers and peers, choosing which pieces to fetch, saving
+  and checking data, and remembering progress. It has no terminal code,
+  so other front ends can be built on it.
+- **`npeer`** is the command-line program: options, settings and the
+  live progress display.
+
+### Planned
+
+- Finding peers without trackers (DHT, PEX and local discovery)
+- Accepting incoming connections from other peers
+- A background service with a remote control, and a full-screen
+  terminal interface
 - BitTorrent v2
 
 ## Acknowledgements
 
-The protocol behaviour grew out of a hand-written BitTorrent
-implementation built for the
+npeer grew out of a hand-written BitTorrent implementation built for the
 [CodeCrafters BitTorrent challenge](https://codecrafters.io), then
-reworked into an engine designed for real-world swarms.
+reworked into an engine designed for real-world use.
 
 ## License
 
@@ -300,5 +417,5 @@ Copyright (c) 2026 npeer contributors.
 
 npeer is free software, licensed under the
 [GNU General Public License v3.0 or later](LICENSE). You can use, study,
-share and improve it freely — and if you distribute a modified version,
-it must stay under the same license.
+share and improve it freely. If you share a changed version, it must
+stay under the same license.

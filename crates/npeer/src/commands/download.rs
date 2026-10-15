@@ -6,24 +6,34 @@ use std::pin::pin;
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use npeer_core::session::{
     Engine, EngineOptions, EngineSummary, Event, StateStore, StateUpdate, StopReason, StoredStatus,
     TorrentState, unix_now,
 };
 use npeer_core::storage::Storage;
-use npeer_core::{Metainfo, verify};
-use tokio_util::sync::CancellationToken;
+use npeer_core::{FileSelection, Metainfo};
 
+use crate::commands::verify::check_pieces;
 use crate::commands::{Ctx, Source, parse_source, resolve_source};
-use crate::ui::{self, DownloadUi, VerifyUi};
+use crate::files::FileChoice;
+use crate::ui::{self, DownloadUi};
+use crate::units;
 
 /// `npeer download <sources...>`
 pub async fn run(
     ctx: &Ctx,
     sources: &[String],
     explicit_output: Option<PathBuf>,
+    choice: Option<FileChoice>,
 ) -> Result<ExitCode> {
+    if choice.is_some() && sources.len() > 1 {
+        bail!(
+            "--only and --skip pick files of one torrent at a time; \
+             give a single torrent or magnet link"
+        );
+    }
+
     // Validate every source up front: a typo in the third argument must
     // fail now, not after the first download has run for an hour.
     let parsed: Vec<Source> = sources
@@ -39,7 +49,7 @@ pub async fn run(
         let (metainfo, doc) = resolve_source(ctx, source).await?;
         ctx.store.save_torrent_file(metainfo.info_hash, &doc)?;
 
-        match download_one(ctx, metainfo, explicit_output.clone()).await? {
+        match download_one(ctx, metainfo, explicit_output.clone(), choice.as_ref()).await? {
             RunOutcome::Complete => {}
             RunOutcome::Paused => {
                 paused = true;
@@ -61,7 +71,15 @@ pub async fn run(
 }
 
 /// `npeer resume <id>` / `npeer resume --all`
-pub async fn resume(ctx: &Ctx, id: Option<&str>, all: bool) -> Result<ExitCode> {
+pub async fn resume(
+    ctx: &Ctx,
+    id: Option<&str>,
+    all: bool,
+    choice: Option<FileChoice>,
+) -> Result<ExitCode> {
+    if choice.is_some() && id.is_none() {
+        bail!("name the torrent to pick files from: npeer resume <id> --only 1,3");
+    }
     let targets: Vec<TorrentState> = if all {
         ctx.store
             .list()?
@@ -96,7 +114,8 @@ pub async fn resume(ctx: &Ctx, id: Option<&str>, all: bool) -> Result<ExitCode> 
             continue;
         };
         let metainfo = Arc::new(Metainfo::from_torrent_bytes(&doc)?);
-        match download_one(ctx, metainfo, Some(state.output_dir.clone())).await? {
+        let output_dir = Some(state.output_dir.clone());
+        match download_one(ctx, metainfo, output_dir, choice.as_ref()).await? {
             RunOutcome::Complete => {}
             RunOutcome::Paused => return Ok(ExitCode::from(130)),
         }
@@ -147,6 +166,7 @@ async fn download_one(
     ctx: &Ctx,
     metainfo: Arc<Metainfo>,
     explicit_output: Option<PathBuf>,
+    choice: Option<&FileChoice>,
 ) -> Result<RunOutcome> {
     let settings = &ctx.settings;
     let previous = ctx.store.load(metainfo.info_hash)?;
@@ -155,61 +175,94 @@ async fn download_one(
         .or_else(|| previous.as_ref().map(|s| s.output_dir.clone()))
         .unwrap_or_else(|| settings.download_dir.clone());
 
-    let storage = Arc::new(Storage::plan(&output_dir, &metainfo));
+    // Download the newly chosen files, or keep the earlier choice.
+    let file_count = metainfo.files.len();
+    let earlier = previous.as_ref().map(|s| s.file_selection(file_count));
+    let selection = match choice {
+        Some(choice) => choice.apply(&metainfo)?,
+        None => earlier
+            .clone()
+            .unwrap_or_else(|| FileSelection::all(file_count)),
+    };
+
+    let storage = Arc::new(Storage::plan_selected(
+        &output_dir,
+        &metainfo,
+        &selection,
+        &ctx.store.parts_dir(metainfo.info_hash),
+    ));
     let files_present = storage.any_file_exists();
+    let wanted = storage.wanted_pieces();
+    let wanted_count = wanted.iter().filter(|&&w| w).count();
+    // Pieces touching a file whose choice changed are stored differently
+    // now, so what was recorded about them no longer counts.
+    let changed = match &earlier {
+        Some(earlier) => selection.changed_pieces(earlier, &metainfo),
+        None => vec![false; wanted.len()],
+    };
 
     // Figure out what we already have.
     let mut have: Vec<bool> = match &previous {
-        Some(state) if state.piece_count == metainfo.piece_count() && files_present => {
-            state.have_pieces()
-        }
+        Some(state) if state.piece_count == metainfo.piece_count() && files_present => state
+            .have_pieces()
+            .iter()
+            .zip(wanted.iter().zip(&changed))
+            .map(|(&have, (&wanted, &changed))| have && wanted && !changed)
+            .collect(),
         _ => vec![false; metainfo.piece_count() as usize],
     };
     let had_state = previous.is_some();
-    let already_have: u32 = have.iter().filter(|&&h| h).count() as u32;
+    let already_have = have.iter().filter(|&&h| h).count();
 
     storage
         .open_all()
         .with_context(|| format!("could not prepare files in {}", output_dir.display()))?;
 
-    // Verify on-disk data when asked to, or when files exist without state.
-    let should_verify =
-        files_present && (settings.verify_on_resume || !had_state || already_have == 0);
-    if should_verify {
-        let verify_ui = VerifyUi::new(settings.progress, metainfo.piece_count());
-        // The verify callback must be 'static, so progress goes via a channel.
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut verify_task = pin!(verify::verify_pieces(
-            storage.clone(),
-            metainfo.clone(),
-            CancellationToken::new(),
-            move |checked, total| {
-                let _ = tx.send((checked, total));
-            },
-        ));
-        have = loop {
-            tokio::select! {
-                result = &mut verify_task => break result?,
-                Some((checked, _)) = rx.recv() => verify_ui.update(checked),
-            }
+    if !selection.is_everything() {
+        let note = if choice.is_none() {
+            " · chosen earlier, change with --only or --skip"
+        } else {
+            ""
         };
-        verify_ui.finish();
-        let good = have.iter().filter(|&&h| h).count();
-        if good > 0 {
-            println!(
-                "✓ Verified existing data: {good}/{} pieces intact",
-                metainfo.piece_count()
-            );
+        println!(
+            "✓ Selected {} of {file_count} files ({}){note}",
+            selection.wanted_count(),
+            units::bytes(storage.selected_length())
+        );
+    }
+
+    // Check data on disk: all of it when asked to, or when files exist
+    // without usable state; otherwise just the pieces whose storage changed.
+    let check_all = files_present && (settings.verify_on_resume || !had_state || already_have == 0);
+    let check: Vec<bool> = wanted
+        .iter()
+        .zip(&changed)
+        .map(|(&wanted, &changed)| files_present && wanted && (check_all || changed))
+        .collect();
+    if check.contains(&true) {
+        let found = check_pieces(settings.progress, &storage, &metainfo, check.clone()).await?;
+        for (piece, &checked) in check.iter().enumerate() {
+            if checked {
+                have[piece] = found[piece];
+            }
+        }
+        let good = found.iter().filter(|&&ok| ok).count();
+        if check_all && good > 0 {
+            println!("✓ Verified existing data: {good}/{wanted_count} pieces intact");
         }
     }
 
-    let complete_already = have.iter().all(|&h| h);
+    let complete_already = have
+        .iter()
+        .zip(&wanted)
+        .all(|(&have, &wanted)| have || !wanted);
     if complete_already && !settings.seeding.enabled {
         save_state_snapshot(
             ctx,
             &metainfo,
             &output_dir,
             &have,
+            &selection,
             &previous,
             StoredStatus::Completed,
         );
@@ -227,6 +280,7 @@ async fn download_one(
         &metainfo,
         &output_dir,
         &have,
+        &selection,
         &previous,
         StoredStatus::Active,
     );
@@ -270,12 +324,21 @@ async fn download_one(
     }
     ctx.store.save(&final_state)?;
 
+    let size = if selection.is_everything() {
+        units::bytes(storage.selected_length())
+    } else {
+        format!(
+            "{} ({} of {file_count} files)",
+            units::bytes(storage.selected_length()),
+            selection.wanted_count()
+        )
+    };
     ui::print_summary(
         &metainfo.name,
         storage.content_path(),
         &summary,
-        metainfo.total_length,
-        metainfo.piece_count(),
+        &size,
+        wanted_count,
         settings.seeding.enabled,
     );
 
@@ -310,7 +373,7 @@ async fn drive_ui(
         ctx.settings.progress,
         &metainfo.name,
         &target_dir,
-        metainfo.total_length,
+        storage.selected_length(),
         options.download_limit,
         options.upload_limit,
     );
@@ -398,6 +461,7 @@ fn save_state_snapshot(
     metainfo: &Metainfo,
     output_dir: &std::path::Path,
     have: &[bool],
+    selection: &FileSelection,
     previous: &Option<TorrentState>,
     status: StoredStatus,
 ) -> TorrentState {
@@ -417,8 +481,15 @@ fn save_state_snapshot(
             .map(|s| s.added_at)
             .unwrap_or_else(unix_now),
         completed_at: previous.as_ref().and_then(|s| s.completed_at),
+        selection: None,
+        saved_by: None,
     };
     state.set_have_pieces(have);
+    state.set_selection(selection, metainfo);
+    // Choosing more files can turn a finished torrent unfinished again.
+    if state.progress() < 1.0 {
+        state.completed_at = None;
+    }
     if status == StoredStatus::Completed && state.completed_at.is_none() {
         state.completed_at = Some(unix_now());
     }

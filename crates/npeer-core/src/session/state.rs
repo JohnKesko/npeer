@@ -5,6 +5,7 @@
 //! ```text
 //! <data>/torrents/<info-hash>.json     resume state
 //! <data>/torrents/<info-hash>.torrent  copy of the metadata
+//! <data>/torrents/<info-hash>.parts/   leftovers of skipped files
 //! ```
 //!
 //! The `.torrent` copy means magnet downloads survive restarts without
@@ -16,6 +17,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
+use crate::metainfo::Metainfo;
+use crate::selection::FileSelection;
 use crate::types::InfoHash;
 
 pub const STATE_VERSION: u32 = 1;
@@ -50,37 +53,115 @@ pub struct TorrentState {
     /// Unix timestamps (seconds).
     pub added_at: u64,
     pub completed_at: Option<u64>,
+    /// Which files to download; absent when it is every file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection: Option<StoredSelection>,
+    /// npeer version that last saved this state, so an older version can
+    /// be warned off downloads it may not understand. Set by
+    /// [`StateStore::save`]; absent in states from before it existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saved_by: Option<String>,
+}
+
+/// A choice of files that leaves some out.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StoredSelection {
+    /// 0-based indices of the files not downloaded.
+    pub skipped_files: Vec<u32>,
+    /// Hex-encoded bitfield of the pieces the chosen files need.
+    pub pieces: String,
+    /// Total size of the chosen files.
+    pub length: u64,
 }
 
 impl TorrentState {
     pub fn have_pieces(&self) -> Vec<bool> {
-        let bytes = hex::decode(&self.have).unwrap_or_default();
-        (0..self.piece_count as usize)
-            .map(|p| {
-                bytes
-                    .get(p / 8)
-                    .is_some_and(|byte| byte & (0x80 >> (p % 8)) != 0)
-            })
-            .collect()
+        decode_bits(&self.have, self.piece_count)
     }
 
     pub fn set_have_pieces(&mut self, have: &[bool]) {
-        let mut bytes = vec![0u8; have.len().div_ceil(8)];
-        for (piece, &has) in have.iter().enumerate() {
-            if has {
-                bytes[piece / 8] |= 0x80 >> (piece % 8);
+        self.have = encode_bits(have);
+    }
+
+    /// Remember which files are downloaded.
+    pub fn set_selection(&mut self, selection: &FileSelection, metainfo: &Metainfo) {
+        self.selection = (!selection.is_everything()).then(|| {
+            let wanted: Vec<bool> = selection
+                .piece_weights(metainfo)
+                .iter()
+                .map(|&weight| weight > 0)
+                .collect();
+            StoredSelection {
+                skipped_files: selection.skipped(),
+                pieces: encode_bits(&wanted),
+                length: selection.selected_length(metainfo),
             }
+        });
+    }
+
+    /// The remembered file choice for a torrent with `file_count` files.
+    pub fn file_selection(&self, file_count: usize) -> FileSelection {
+        match &self.selection {
+            Some(stored) => FileSelection::skipping(file_count, &stored.skipped_files),
+            None => FileSelection::all(file_count),
         }
-        self.have = hex::encode(bytes);
+    }
+
+    /// Size of what is being downloaded: the chosen files, or everything.
+    pub fn selected_length(&self) -> u64 {
+        self.selection
+            .as_ref()
+            .map_or(self.total_length, |stored| stored.length)
+    }
+
+    /// Pieces the chosen files need.
+    pub fn wanted_pieces(&self) -> Vec<bool> {
+        match &self.selection {
+            Some(stored) => decode_bits(&stored.pieces, self.piece_count),
+            None => vec![true; self.piece_count as usize],
+        }
+    }
+
+    /// Verified pieces among the wanted ones, and how many are wanted.
+    pub fn piece_progress(&self) -> (usize, usize) {
+        let wanted = self.wanted_pieces();
+        let have = self
+            .have_pieces()
+            .iter()
+            .zip(&wanted)
+            .filter(|&(&have, &wanted)| have && wanted)
+            .count();
+        (have, wanted.iter().filter(|&&w| w).count())
     }
 
     pub fn progress(&self) -> f64 {
-        if self.piece_count == 0 {
-            return 0.0;
+        match self.piece_progress() {
+            (_, 0) => 0.0,
+            (have, wanted) => have as f64 / wanted as f64,
         }
-        let have = self.have_pieces().iter().filter(|&&h| h).count();
-        have as f64 / f64::from(self.piece_count)
     }
+}
+
+/// Wire-format bitfield (high bit of byte 0 is piece 0) as hex.
+fn encode_bits(bits: &[bool]) -> String {
+    let mut bytes = vec![0u8; bits.len().div_ceil(8)];
+    for (index, &set) in bits.iter().enumerate() {
+        if set {
+            bytes[index / 8] |= 0x80 >> (index % 8);
+        }
+    }
+    hex::encode(bytes)
+}
+
+fn decode_bits(hex_bits: &str, count: u32) -> Vec<bool> {
+    let bytes = hex::decode(hex_bits).unwrap_or_default();
+    (0..count as usize)
+        .map(|index| {
+            bytes
+                .get(index / 8)
+                .is_some_and(|byte| byte & (0x80 >> (index % 8)) != 0)
+        })
+        .collect()
 }
 
 /// File-based store for torrent states and metadata copies.
@@ -106,11 +187,20 @@ impl StateStore {
         self.torrents_dir.join(format!("{info_hash}.torrent"))
     }
 
+    /// Where skipped files keep the bytes they share with chosen ones.
+    pub fn parts_dir(&self, info_hash: InfoHash) -> PathBuf {
+        self.torrents_dir.join(format!("{info_hash}.parts"))
+    }
+
     /// Persist state atomically (write to a temp file, then rename).
     pub fn save(&self, state: &TorrentState) -> Result<()> {
         let path = self.state_path(state.info_hash);
         let tmp = path.with_extension("json.tmp");
-        let json = serde_json::to_vec_pretty(state)
+        let state = TorrentState {
+            saved_by: Some(crate::VERSION.to_owned()),
+            ..state.clone()
+        };
+        let json = serde_json::to_vec_pretty(&state)
             .map_err(|e| Error::Other(format!("encoding state: {e}")))?;
         fs::write(&tmp, json)
             .map_err(|e| Error::Storage(format!("writing {}: {e}", tmp.display())))?;
@@ -166,8 +256,16 @@ impl StateStore {
         Ok(states)
     }
 
-    /// Remove a torrent's state and metadata copy.
+    /// Remove a torrent's state, metadata copy and part files.
     pub fn remove(&self, info_hash: InfoHash) -> Result<()> {
+        let parts = self.parts_dir(info_hash);
+        match fs::remove_dir_all(&parts) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(Error::Storage(format!("removing {}: {e}", parts.display())));
+            }
+        }
         for path in [
             self.state_path(info_hash),
             self.torrent_file_path(info_hash),
@@ -243,6 +341,8 @@ mod tests {
             status: StoredStatus::Active,
             added_at: unix_now(),
             completed_at: None,
+            selection: None,
+            saved_by: None,
         };
         state.set_have_pieces(&[true, false, true]);
         state
@@ -253,6 +353,55 @@ mod tests {
         let state = sample_state(1, "a");
         assert_eq!(state.have_pieces(), vec![true, false, true]);
         assert!((state.progress() - 2.0 / 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn selection_round_trips_and_drives_progress() {
+        use crate::metainfo::test_support::multi_file_meta;
+        // Files [0,10) [10,32) [32,40) in pieces of 16; skip the middle one.
+        let meta = multi_file_meta(&[10, 22, 8], 16);
+        let mut state = sample_state(3, "dir");
+        state.total_length = 40;
+
+        state.set_selection(&FileSelection::skipping(3, &[1]), &meta);
+        assert_eq!(state.selected_length(), 18);
+        assert_eq!(state.wanted_pieces(), vec![true, false, true]);
+        assert_eq!(state.file_selection(3), FileSelection::skipping(3, &[1]));
+        // Pieces 0 and 2 are had: both wanted pieces, so it is complete.
+        assert_eq!(state.piece_progress(), (2, 2));
+        assert!((state.progress() - 1.0).abs() < 1e-9);
+
+        // Survives a save and load, and choosing everything clears it.
+        let json = serde_json::to_string(&state).unwrap();
+        let loaded: TorrentState = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.selected_length(), 18);
+        state.set_selection(&FileSelection::all(3), &meta);
+        assert!(state.selection.is_none());
+        assert!(!serde_json::to_string(&state).unwrap().contains("selection"));
+    }
+
+    #[test]
+    fn state_without_selection_still_loads() {
+        // State files written before file selection existed.
+        let mut value = serde_json::to_value(sample_state(4, "old")).unwrap();
+        value.as_object_mut().unwrap().remove("selection");
+        let state: TorrentState = serde_json::from_value(value).unwrap();
+        assert!(state.selection.is_none());
+        assert_eq!(state.selected_length(), state.total_length);
+    }
+
+    #[test]
+    fn remove_deletes_part_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = StateStore::open(dir.path()).unwrap();
+        let state = sample_state(0xCC, "parts");
+        store.save(&state).unwrap();
+        let parts = store.parts_dir(state.info_hash);
+        fs::create_dir_all(&parts).unwrap();
+        fs::write(parts.join("1.part"), b"x").unwrap();
+
+        store.remove(state.info_hash).unwrap();
+        assert!(!parts.exists());
     }
 
     #[test]
@@ -268,6 +417,7 @@ mod tests {
 
         let loaded = store.load(state.info_hash).unwrap().unwrap();
         assert_eq!(loaded.name, "ubuntu.iso");
+        assert_eq!(loaded.saved_by.as_deref(), Some(crate::VERSION));
         assert_eq!(
             store.load_torrent_file(state.info_hash).unwrap().unwrap(),
             b"fake-torrent"
