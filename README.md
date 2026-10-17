@@ -163,6 +163,10 @@ Download only some files by their number:
   npeer download nature-sounds.torrent --skip 6
 ```
 
+For a torrent you have already added, you can use its id from
+`npeer list` instead: `npeer info 5b1f0c9e`, or part of its name, like
+`npeer info nature`.
+
 The `#` column is npeer's number for each file. You use it to pick
 files, as shown next. Torrents with more than 20 files show the first
 20; add `--files` to see them all.
@@ -264,7 +268,7 @@ change that in the [settings](#settings).
 | Command | What it does |
 | --- | --- |
 | `npeer download <torrent\|magnet>` | Download. `--only` / `--skip` pick files. Also `npeer add` or `npeer get` |
-| `npeer info <torrent\|magnet>` | Show what's inside, with numbered files |
+| `npeer info <torrent\|magnet\|id>` | Show what's inside, with numbered files |
 | `npeer peers <torrent\|magnet>` | Show who is sharing a torrent right now |
 | `npeer list` | List all your downloads |
 | `npeer status [id]` | Show details about downloads |

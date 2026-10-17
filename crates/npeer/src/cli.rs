@@ -38,9 +38,10 @@ pub enum Command {
     #[command(visible_alias = "add", visible_alias = "get")]
     Download(DownloadArgs),
 
-    /// Show metadata for a torrent file or magnet link
+    /// Show metadata for a torrent file, magnet link or known torrent
     Info {
-        /// Path to a .torrent file, or a magnet link
+        /// Path to a .torrent file, a magnet link, or a torrent's id (or
+        /// part of its name) from `npeer list`
         source: String,
         /// List every file, not just the first 20
         #[arg(long)]

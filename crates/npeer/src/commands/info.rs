@@ -1,6 +1,8 @@
 //! `npeer info`: show torrent metadata.
 
-use anyhow::Result;
+use std::sync::Arc;
+
+use anyhow::{Context, Result};
 use npeer_core::Metainfo;
 
 use crate::commands::{Ctx, Source, parse_source, resolve_source};
@@ -10,8 +12,19 @@ use crate::{ui, units};
 const SHOWN: usize = 20;
 
 pub async fn run(ctx: &Ctx, input: &str, all_files: bool) -> Result<()> {
-    let source = parse_source(input)?;
-    let (metainfo, _) = resolve_source(ctx, &source).await?;
+    // A torrent file or magnet link, or else a torrent npeer already knows.
+    let (metainfo, pick_command) = match parse_source(input) {
+        Ok(source) => {
+            let (metainfo, _) = resolve_source(ctx, &source).await?;
+            (metainfo, download_command(&source, input))
+        }
+        Err(not_a_source) => match known_torrent(ctx, input) {
+            Ok(found) => found,
+            // A path-looking input is a missing file, not a mistyped id.
+            Err(_) if looks_like_path(input) => return Err(not_a_source),
+            Err(not_known) => return Err(not_known),
+        },
+    };
 
     println!();
     let row = |label: &str, value: String| println!("{label:<12} {value}");
@@ -54,14 +67,31 @@ pub async fn run(ctx: &Ctx, input: &str, all_files: bool) -> Result<()> {
     }
 
     if metainfo.multi_file {
-        print_files(&metainfo, &source, input, all_files);
+        print_files(&metainfo, &pick_command, all_files);
     }
     Ok(())
 }
 
+/// A torrent from `npeer list`, by id or part of its name, read from the
+/// copy npeer keeps. Files are picked for it with `npeer resume`.
+fn known_torrent(ctx: &Ctx, id: &str) -> Result<(Arc<Metainfo>, String)> {
+    let state = ctx.store.resolve(id)?;
+    let doc = ctx
+        .store
+        .load_torrent_file(state.info_hash)?
+        .with_context(|| format!("stored metadata for {} is missing", state.name))?;
+    let metainfo = Metainfo::from_torrent_bytes(&doc)?;
+    let command = format!("npeer resume {}", &state.info_hash.to_hex()[..8]);
+    Ok((Arc::new(metainfo), command))
+}
+
+fn looks_like_path(input: &str) -> bool {
+    input.contains(['/', '\\']) || input.ends_with(".torrent")
+}
+
 /// The numbered file list, set apart from the torrent's own details so the
 /// numbers read as npeer's and not as part of the file names.
-fn print_files(metainfo: &Metainfo, source: &Source, input: &str, all_files: bool) {
+fn print_files(metainfo: &Metainfo, pick_command: &str, all_files: bool) {
     let count = metainfo.files.len();
     let shown = if all_files { count } else { count.min(SHOWN) };
     let rows: Vec<Vec<String>> = metainfo
@@ -89,22 +119,27 @@ fn print_files(metainfo: &Metainfo, source: &Source, input: &str, all_files: boo
 
     println!();
     println!("Download only some files by their number:");
-    for example in pick_examples(source, input, count) {
+    for example in pick_examples(pick_command, count) {
         println!("  {example}");
     }
 }
 
-/// Ready-to-run `--only` / `--skip` commands for this torrent.
-fn pick_examples(source: &Source, input: &str, file_count: usize) -> [String; 2] {
+/// The command that downloads `source`, as the user would retype it.
+fn download_command(source: &Source, input: &str) -> String {
     let target = match source {
         Source::Magnet(_) => "<magnet link>".to_owned(),
         Source::Torrent(_) if input.contains(char::is_whitespace) => format!("'{input}'"),
         Source::Torrent(_) => input.to_owned(),
     };
+    format!("npeer download {target}")
+}
+
+/// Ready-to-run `--only` / `--skip` commands for this torrent.
+fn pick_examples(command: &str, file_count: usize) -> [String; 2] {
     let first_few = if file_count >= 3 { "1-3" } else { "1" };
     [
-        format!("npeer download {target} --only {first_few}"),
-        format!("npeer download {target} --skip {file_count}"),
+        format!("{command} --only {first_few}"),
+        format!("{command} --skip {file_count}"),
     ]
 }
 
@@ -117,8 +152,9 @@ mod tests {
     #[test]
     fn examples_use_real_numbers_and_a_runnable_path() {
         let file = Source::Torrent(PathBuf::from("wired-cd.torrent"));
+        let command = download_command(&file, "wired-cd.torrent");
         assert_eq!(
-            pick_examples(&file, "wired-cd.torrent", 18),
+            pick_examples(&command, 18),
             [
                 "npeer download wired-cd.torrent --only 1-3",
                 "npeer download wired-cd.torrent --skip 18",
@@ -126,7 +162,8 @@ mod tests {
         );
 
         let spaced = Source::Torrent(PathBuf::from("my album.torrent"));
-        let [only, skip] = pick_examples(&spaced, "my album.torrent", 2);
+        let command = download_command(&spaced, "my album.torrent");
+        let [only, skip] = pick_examples(&command, 2);
         assert_eq!(only, "npeer download 'my album.torrent' --only 1");
         assert_eq!(skip, "npeer download 'my album.torrent' --skip 2");
     }
@@ -138,7 +175,19 @@ mod tests {
             name: None,
             trackers: vec![],
         });
-        let [only, _] = pick_examples(&magnet, "magnet:?xt=urn:btih:0101", 5);
+        let command = download_command(&magnet, "magnet:?xt=urn:btih:0101");
+        let [only, _] = pick_examples(&command, 5);
         assert_eq!(only, "npeer download <magnet link> --only 1-3");
+    }
+
+    #[test]
+    fn known_torrents_pick_files_with_resume() {
+        let [only, skip] = pick_examples("npeer resume 5b1f0c9e", 6);
+        assert_eq!(only, "npeer resume 5b1f0c9e --only 1-3");
+        assert_eq!(skip, "npeer resume 5b1f0c9e --skip 6");
+        assert!(looks_like_path("~/Downloads/x.torrent"));
+        assert!(looks_like_path("x.torrent"));
+        assert!(!looks_like_path("5b1f0c9e"));
+        assert!(!looks_like_path("nature"));
     }
 }
