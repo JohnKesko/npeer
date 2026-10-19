@@ -163,9 +163,14 @@ Download only some files by their number:
   npeer download nature-sounds.torrent --skip 6
 ```
 
-For a torrent you have already added, you can use its id from
-`npeer list` instead: `npeer info 5b1f0c9e`, or part of its name, like
-`npeer info nature`.
+**Already added the torrent?** Then you don't need the torrent file or
+magnet link anymore. Use its id from [`npeer list`](#see-your-downloads),
+or part of its name:
+
+```bash
+npeer info 5b1f0c9e
+npeer info nature
+```
 
 The `#` column is npeer's number for each file. You use it to pick
 files, as shown next. Torrents with more than 20 files show the first
@@ -189,6 +194,8 @@ You can list numbers like `1,3,5-8`.
 - npeer remembers your choice when you continue the download later.
 - To change your mind, run the download again with a new `--only` or
   `--skip`. Use `--only all` to get every file.
+- For a download you already added, use its id with `npeer resume`
+  instead, for example `npeer resume nature --skip 6`.
 
 ### Pause and continue
 
@@ -216,6 +223,9 @@ c7a2e410  debian-13.6.0-amd64-netinst.iso  755 MiB  64.0%   incomplete
 
 The first column is the download's id. Whenever a command asks for an
 id, you can also type any part of the name instead, like `nature` above.
+
+You can use the id with `npeer info`, `status`, `resume`, `pause`,
+`stop`, `verify` and `remove`.
 
 ### Choose where files go
 
